@@ -96,7 +96,7 @@ class Project {
     return {
       name: name,
       canvas: layerCanvas,
-      ctx: layerCanvas.getContext('2d'),
+      ctx: layerCanvas.getContext('2d', { alpha: false }),
       visible: true,
       opacity: 1,
     }
@@ -118,11 +118,11 @@ const $ = (sel) => document.querySelector(sel)
 const $$ = (sel) => document.querySelectorAll(sel)
 
 const canvas = $('#pixelCanvas')
-const ctx = canvas.getContext('2d')
+const ctx = canvas.getContext('2d', { alpha: false })
 const gridOverlay = $('#gridOverlay')
-const gridCtx = gridOverlay.getContext('2d')
+const gridCtx = gridOverlay.getContext('2d', { alpha: false })
 const previewOverlay = $('#previewOverlay')
-const previewCtx = previewOverlay.getContext('2d')
+const previewCtx = previewOverlay.getContext('2d', { alpha: false })
 
 const canvasWrapper = $('#canvasWrapper')
 const canvasContainer = $('#canvasContainer')
@@ -147,7 +147,7 @@ const framesList = $('#framesList')
 const frameCounter = $('#frameCounter')
 const fpsInput = $('#fpsInput')
 const animPreviewCanvas = $('#animPreviewCanvas')
-const animPreviewCtx = animPreviewCanvas.getContext('2d')
+const animPreviewCtx = animPreviewCanvas.getContext('2d', { alpha: false })
 
 // Drawing state (Global for active canvas interaction)
 const drawingState = {
@@ -466,7 +466,7 @@ function createLayer(name) {
   return {
     name: name || `Capa ${state.layers.length + 1}`,
     canvas: layerCanvas,
-    ctx: layerCanvas.getContext('2d'),
+    ctx: layerCanvas.getContext('2d', { alpha: false }),
     visible: true,
     opacity: 1,
   }
@@ -529,7 +529,7 @@ function renderLayersList() {
     thumb.className = 'layer-thumb'
     thumb.width = 32
     thumb.height = 32
-    const thumbCtx = thumb.getContext('2d')
+    const thumbCtx = thumb.getContext('2d', { alpha: false })
     thumbCtx.imageSmoothingEnabled = false
     thumbCtx.drawImage(layer.canvas, 0, 0, 32, 32)
 
@@ -680,7 +680,7 @@ function renderFramesList() {
     const fc = document.createElement('canvas')
     fc.width = state.width
     fc.height = state.height
-    const fctx = fc.getContext('2d')
+    const fctx = fc.getContext('2d', { alpha: false })
     fctx.imageSmoothingEnabled = false
 
     // Composite all layers for this frame
@@ -779,7 +779,7 @@ function updateFrameThumbnail() {
 
   const fc = thumbs[state.currentFrameIndex].querySelector('canvas')
   if (!fc) return
-  const fctx = fc.getContext('2d')
+  const fctx = fc.getContext('2d', { alpha: false })
   fctx.clearRect(0, 0, fc.width, fc.height)
   fctx.imageSmoothingEnabled = false
 
@@ -1083,7 +1083,7 @@ function copySelectionToClipboard() {
   drawingState.clipboardCanvas = document.createElement('canvas')
   drawingState.clipboardCanvas.width = rect.w
   drawingState.clipboardCanvas.height = rect.h
-  const clipCtx = drawingState.clipboardCanvas.getContext('2d')
+  const clipCtx = drawingState.clipboardCanvas.getContext('2d', { alpha: false })
   clipCtx.drawImage(layer.canvas, -rect.x, -rect.y)
 
   drawingState.pasteStartX = rect.x
@@ -1185,7 +1185,7 @@ function hideTextDialog() {
 function renderTextToBitmap(text, font, size) {
   // Create a temporary canvas for text measurement
   const tempCanvas = document.createElement('canvas')
-  const tempCtx = tempCanvas.getContext('2d')
+  const tempCtx = tempCanvas.getContext('2d', { alpha: false })
 
   const fontSize = parseInt(size)
   const fontFamily = font || 'monospace'
@@ -1198,7 +1198,7 @@ function renderTextToBitmap(text, font, size) {
   const textCanvas = document.createElement('canvas')
   textCanvas.width = width
   textCanvas.height = height
-  const ctx = textCanvas.getContext('2d')
+  const ctx = textCanvas.getContext('2d', { alpha: false })
   ctx.font = `${fontSize}px ${fontFamily}`
   ctx.fillStyle = state.currentColor
   ctx.fillText(text, 2, fontSize + 1)
@@ -1214,7 +1214,7 @@ function saveUndoState() {
     const copyCanvas = document.createElement('canvas')
     copyCanvas.width = state.width
     copyCanvas.height = state.height
-    const copyCtx = copyCanvas.getContext('2d')
+    const copyCtx = copyCanvas.getContext('2d', { alpha: false })
     copyCtx.drawImage(l.canvas, 0, 0)
     return {
       name: l.name,
@@ -1244,7 +1244,7 @@ function undo() {
     const copyCanvas = document.createElement('canvas')
     copyCanvas.width = state.width
     copyCanvas.height = state.height
-    copyCanvas.getContext('2d').drawImage(l.canvas, 0, 0)
+    copyCanvas.getContext('2d', { alpha: false }).drawImage(l.canvas, 0, 0)
     return { name: l.name, canvas: copyCanvas, visible: l.visible, opacity: l.opacity }
   })
   state.redoStack.push({
@@ -1263,7 +1263,7 @@ function redo() {
     const copyCanvas = document.createElement('canvas')
     copyCanvas.width = state.width
     copyCanvas.height = state.height
-    copyCanvas.getContext('2d').drawImage(l.canvas, 0, 0)
+    copyCanvas.getContext('2d', { alpha: false }).drawImage(l.canvas, 0, 0)
     return { name: l.name, canvas: copyCanvas, visible: l.visible, opacity: l.opacity }
   })
   state.undoStack.push({
@@ -1525,7 +1525,7 @@ function setupEventListeners() {
     drawingState.clipboardCanvas = document.createElement('canvas')
     drawingState.clipboardCanvas.width = rect.w
     drawingState.clipboardCanvas.height = rect.h
-    const clipCtx = drawingState.clipboardCanvas.getContext('2d')
+    const clipCtx = drawingState.clipboardCanvas.getContext('2d', { alpha: false })
     clipCtx.drawImage(layer.canvas, -rect.x, -rect.y)
     drawingState.pasteMode = true
     drawingState.pasteStartX = rect.x
@@ -1838,7 +1838,7 @@ function onCanvasMouseDown(e) {
       const moveCanvas = document.createElement('canvas')
       moveCanvas.width = state.width
       moveCanvas.height = state.height
-      moveCanvas.getContext('2d').drawImage(layer.canvas, 0, 0)
+      moveCanvas.getContext('2d', { alpha: false }).drawImage(layer.canvas, 0, 0)
       drawingState.moveLayerData = moveCanvas
       break
 
@@ -1875,7 +1875,7 @@ function onCanvasMouseDown(e) {
           drawingState.draggedPixelsCanvas = document.createElement('canvas')
           drawingState.draggedPixelsCanvas.width = dragRect.w
           drawingState.draggedPixelsCanvas.height = dragRect.h
-          const dragCtx = drawingState.draggedPixelsCanvas.getContext('2d')
+          const dragCtx = drawingState.draggedPixelsCanvas.getContext('2d', { alpha: false })
           dragCtx.imageSmoothingEnabled = false
 
           // Copy only selected pixels
@@ -2624,11 +2624,11 @@ function resizeAllCanvases(newW, newH) {
       const tempCanvas = document.createElement('canvas')
       tempCanvas.width = oldW
       tempCanvas.height = oldH
-      tempCanvas.getContext('2d').drawImage(layer.canvas, 0, 0)
+      tempCanvas.getContext('2d', { alpha: false }).drawImage(layer.canvas, 0, 0)
 
       layer.canvas.width = newW
       layer.canvas.height = newH
-      layer.ctx = layer.canvas.getContext('2d')
+      layer.ctx = layer.canvas.getContext('2d', { alpha: false })
       layer.ctx.imageSmoothingEnabled = false
       layer.ctx.drawImage(tempCanvas, 0, 0)
     })
@@ -2707,7 +2707,7 @@ function exportPNG() {
   const exportCanvas = document.createElement('canvas')
   exportCanvas.width = state.width
   exportCanvas.height = state.height
-  const ectx = exportCanvas.getContext('2d')
+  const ectx = exportCanvas.getContext('2d', { alpha: false })
 
   for (let i = state.layers.length - 1; i >= 0; i--) {
     if (!state.layers[i].visible) continue
@@ -2726,7 +2726,7 @@ function exportJPEG() {
   const exportCanvas = document.createElement('canvas')
   exportCanvas.width = state.width
   exportCanvas.height = state.height
-  const ectx = exportCanvas.getContext('2d')
+  const ectx = exportCanvas.getContext('2d', { alpha: false })
 
   // JPEG needs a background color (usually white)
   ectx.fillStyle = '#ffffff'
@@ -2751,7 +2751,7 @@ function exportSpritesheet() {
   const sheetCanvas = document.createElement('canvas')
   sheetCanvas.width = state.width * cols
   sheetCanvas.height = state.height * rows
-  const sctx = sheetCanvas.getContext('2d')
+  const sctx = sheetCanvas.getContext('2d', { alpha: false })
   sctx.imageSmoothingEnabled = false
 
   state.frames.forEach((frameLayers, idx) => {
