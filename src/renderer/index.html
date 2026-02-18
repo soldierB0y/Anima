@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Anima — Pixel Art Studio</title>
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="./assets/main.css" type="text/css" rel="stylesheet" />
+</head>
+
+<body>
+  <div id="app">
+    <!-- ===== MENU BAR ===== -->
+    <nav id="menuBar">
+      <div class="menu-item">
+        <span>Archivo</span>
+        <div class="dropdown-content">
+          <div class="dropdown-option" id="menuNew"><span>Nuevo</span><span class="shortcut">Ctrl+N</span></div>
+          <div class="dropdown-option" id="menuOpen"><span>Abrir</span><span class="shortcut">Ctrl+O</span></div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-option" id="menuSave"><span>Guardar</span><span class="shortcut">Ctrl+S</span></div>
+          <div class="dropdown-option" id="menuSaveAs"><span>Guardar como...</span><span
+              class="shortcut">Ctrl+Shift+S</span></div>
+          <div class="dropdown-option" id="menuExportSheet"><span>Exportar Spritesheet</span></div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-option" id="menuCloseTab"><span>Cerrar pestaña</span><span class="shortcut">Ctrl+W</span>
+          </div>
+          <div class="dropdown-option" id="menuCloseAllTabs"><span>Cerrar todas las pestañas</span></div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-option" id="menuExit"><span>Salir</span><span class="shortcut">Alt+F4</span></div>
+        </div>
+      </div>
+      <div class="menu-item">
+        <span>Edición</span>
+        <div class="dropdown-content">
+          <div class="dropdown-option" id="menuUndo"><span>Deshacer</span><span class="shortcut">Ctrl+Z</span></div>
+          <div class="dropdown-option" id="menuRedo"><span>Rehacer</span><span class="shortcut">Ctrl+Y</span></div>
+        </div>
+      </div>
+      <div class="menu-item">
+        <span>Ver</span>
+        <div class="dropdown-content">
+          <div class="dropdown-option" id="menuToggleGrid"><span>Cuadrícula</span><span class="shortcut">G</span></div>
+          <div class="dropdown-option" id="menuZoomIn"><span>Aumentar Zoom</span><span class="shortcut">Ctrl++</span>
+          </div>
+          <div class="dropdown-option" id="menuZoomOut"><span>Reducir Zoom</span><span class="shortcut">Ctrl+-</span>
+          </div>
+          <div class="dropdown-option" id="menuZoomReset"><span>Resetear Zoom</span><span class="shortcut">Ctrl+0</span>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <!-- ===== TOP TOOLBAR ===== -->
+    <header id="toolbar">
+      <div class="toolbar-left">
+        <div class="logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <rect x="2" y="2" width="8" height="8" rx="1" fill="var(--accent)" />
+            <rect x="14" y="2" width="8" height="8" rx="1" fill="var(--accent-secondary)" opacity="0.7" />
+            <rect x="2" y="14" width="8" height="8" rx="1" fill="var(--accent-secondary)" opacity="0.5" />
+            <rect x="14" y="14" width="8" height="8" rx="1" fill="var(--accent)" opacity="0.8" />
+          </svg>
+          <span>Anima</span>
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <!-- Canvas Size -->
+        <div class="toolbar-group">
+          <label>W:</label>
+          <input type="number" id="canvasWidth" value="16" min="1" max="256" style="width: 50px;" />
+          <label>H:</label>
+          <input type="number" id="canvasHeight" value="16" min="1" max="256" style="width: 50px;" />
+          <button class="icon-btn" id="btnResize" title="Redimensionar Lienzo">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="4 7 4 4 20 4 20 7" />
+              <polyline points="4 17 4 20 20 20 20 17" />
+              <line x1="12" y1="4" x2="12" y2="20" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <!-- Tools -->
+        <div class="toolbar-group tools-group" id="toolsGroup">
+          <button class="tool-btn active" data-tool="pencil" title="Lápiz (B)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="eraser" title="Borrador (E)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21" />
+              <path d="M22 21H7" />
+              <path d="m5 11 9 9" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="fill" title="Rellenar (G)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2c.8.8 2 .8 2.8 0L19 11Z" />
+              <path d="m5 2 5 5" />
+              <path d="M2 13h15" />
+              <path d="M22 20a2 2 0 1 1-4 0c0-1.6 2-3 2-3s2 1.4 2 3Z" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="eyedropper" title="Cuentagotas (I)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="m2 22 1-1h3l9-9" />
+              <path d="M3 21v-3l9-9" />
+              <path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="line" title="Línea (L)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="5" y1="19" x2="19" y2="5" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="rect" title="Rectángulo (R)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="move" title="Mover Capa (M)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="5,9 2,12 5,15" />
+              <polyline points="9,5 12,2 15,5" />
+              <polyline points="15,19 12,22 9,19" />
+              <polyline points="19,9 22,12 19,15" />
+              <line x1="2" y1="12" x2="22" y2="12" />
+              <line x1="12" y1="2" x2="12" y2="22" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="select" title="Selector (S)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="wand" title="Varita Mágica (W)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M15 4l5 5M15 4l-8 8M7 17l-4 4"/>
+              <circle cx="12" cy="12" r="2"/>
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="text" title="Texto (T)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 7h16M6 3v14M18 3v14"/>
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="rig" title="Rigging">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="6" cy="6" r="2" />
+              <circle cx="12" cy="12" r="2" />
+              <circle cx="18" cy="18" r="2" />
+              <line x1="6" y1="6" x2="12" y2="12" />
+              <line x1="12" y1="12" x2="18" y2="18" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="zoom" title="Lupa (Z)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+              <line x1="11" y1="8" x2="11" y2="14" />
+              <line x1="8" y1="11" x2="14" y2="11" />
+            </svg>
+          </button>
+          <button class="tool-btn" data-tool="circle" title="Círculo (C)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="9" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="toolbar-right">
+        <!-- Grid Toggle -->
+        <button class="tool-btn active" id="toggleGrid" title="Mostrar/Ocultar Cuadrícula">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" />
+            <line x1="3" y1="9" x2="21" y2="9" />
+            <line x1="3" y1="15" x2="21" y2="15" />
+            <line x1="9" y1="3" x2="9" y2="21" />
+            <line x1="15" y1="3" x2="15" y2="21" />
+          </svg>
+        </button>
+        <!-- Onion Skin -->
+        <button class="tool-btn" id="toggleOnionSkin" title="Onion Skin (O)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" opacity="0.3" />
+            <circle cx="12" cy="12" r="7" opacity="0.5" />
+            <circle cx="12" cy="12" r="4" />
+          </svg>
+        </button>
+        <div class="toolbar-divider"></div>
+
+        <button class="action-btn" id="btnUndo" title="Deshacer (Ctrl+Z)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="1,4 1,10 7,10" />
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+          </svg>
+        </button>
+        <button class="action-btn" id="btnRedo" title="Rehacer (Ctrl+Y)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="23,4 23,10 17,10" />
+            <path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10" />
+          </svg>
+        </button>
+        <div class="toolbar-divider"></div>
+
+        <button class="action-btn accent" id="btnExportPNG" title="Exportar PNG">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7,10 12,15 17,10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span>PNG</span>
+        </button>
+        <button class="action-btn accent-secondary" id="btnExportGIF" title="Exportar Spritesheet">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7,10 12,15 17,10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span>Sheet</span>
+        </button>
+        <div class="toolbar-divider"></div>
+        <button class="action-btn" id="btnCopySelection" title="Copiar Selección" style="display:none;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          <span>Copiar</span>
+        </button>
+        <button class="action-btn" id="btnPasteSelection" title="Pegar Selección" style="display:none;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M19 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-5 18H7v-2h7v2zm5-4H5V4h14v12z"/>
+          </svg>
+          <span>Pegar</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ===== TABS BAR ===== -->
+    <div id="tabsBar">
+      <div id="tabsList">
+        <!-- Tabs will be injected here -->
+      </div>
+      <button id="btnNewTabPlus" title="Nueva Pestaña">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <main id="mainContent">
+      <!-- LEFT PANEL: Colors -->
+      <aside id="leftPanel">
+        <!-- Color Preview -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span>Color Actual</span>
+          </div>
+          <div id="currentColorPreview">
+            <div id="colorPreviewSwatch"></div>
+            <input type="color" id="colorPickerInput" value="#000000" />
+            <div id="colorHexLabel">#000000</div>
+          </div>
+        </div>
+
+        <!-- Secondary Color Picker -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span>Color Secundario</span>
+          </div>
+          <div id="secondaryColorPreview">
+            <div id="secondaryColorSwatch"></div>
+            <input type="color" id="secondaryColorPickerInput" value="#ffffff" />
+            <div id="secondaryColorHexLabel">#ffffff</div>
+          </div>
+        </div>
+
+        <!-- Default Palette -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span>Paleta de Colores</span>
+          </div>
+          <div id="defaultPalette" class="color-grid"></div>
+        </div>
+
+        <!-- User Palette -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span>Mi Paleta</span>
+            <button class="icon-btn" id="btnClearUserPalette" title="Limpiar mi paleta">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3,6 5,6 21,6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </button>
+          </div>
+          <div id="userPalette" class="color-grid"></div>
+          <div id="userPaletteEmpty" class="empty-message">Los colores seleccionados aparecerán aquí</div>
+        </div>
+      </aside>
+
+      <!-- CENTER: Canvas -->
+      <section id="canvasContainer">
+        <div id="canvasWrapper">
+          <canvas id="pixelCanvas"></canvas>
+          <canvas id="gridOverlay"></canvas>
+          <canvas id="previewOverlay"></canvas>
+        </div>
+        <div id="canvasInfo">
+          <span id="coordsDisplay">X: 0, Y: 0</span>
+          <span id="zoomDisplay">Zoom: 100%</span>
+        </div>
+      </section>
+
+      <!-- RIGHT PANEL: Layers -->
+      <aside id="rightPanel">
+        <div class="panel-section">
+          <div class="section-header">
+            <span>Capas</span>
+            <div class="header-actions">
+              <button class="icon-btn" id="btnAddLayer" title="Agregar capa">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </button>
+              <button class="icon-btn" id="btnDeleteLayer" title="Eliminar capa">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3,6 5,6 21,6" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+              </button>
+              <button class="icon-btn" id="btnMergeDown" title="Combinar hacia abajo">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="6,9 12,15 18,9" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                  <line x1="3" y1="21" x2="21" y2="21" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="layersList"></div>
+        </div>
+
+        <!-- Layer opacity -->
+        <div class="panel-section" id="layerOpacitySection">
+          <div class="section-header">
+            <span>Opacidad</span>
+            <span id="opacityValue">100%</span>
+          </div>
+          <input type="range" id="layerOpacity" min="0" max="100" value="100" class="slider" />
+        </div>
+
+        <!-- Magic Wand Tolerance -->
+        <div class="panel-section" id="wandToleranceSection" style="display:none;">
+          <div class="section-header">
+            <span>Sensibilidad Varita</span>
+            <span id="wandToleranceValue">50</span>
+          </div>
+          <input type="range" id="wandTolerance" min="0" max="100" value="50" class="slider" />
+        </div>
+
+        <!-- Brush Size Control -->
+        <div class="panel-section" id="brushSizeSection" style="display:none;">
+          <div class="section-header">
+            <span>Tamaño de Brush</span>
+            <span id="brushSizeValue">1px</span>
+          </div>
+          <input type="range" id="brushSizeSlider" min="1" max="500" value="1" class="slider" />
+        </div>
+
+        <!-- Rig Editor -->
+        <div class="panel-section" id="rigEditorPanel" style="display:none;">
+          <div class="section-header">
+            <span>Editor de Rig</span>
+          </div>
+          <div style="margin-bottom: 10px;">
+            <label style="display: block; margin-bottom: 5px; font-size: 12px;">Modo:</label>
+            <select id="rigModeSelect" style="width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-secondary); color: var(--text);">
+              <option value="create">Crear Huesos</option>
+              <option value="paint">Pintar Influencia</option>
+              <option value="animate">Animar</option>
+            </select>
+          </div>
+          <div style="margin-bottom: 10px;">
+            <label style="display: block; margin-bottom: 5px; font-size: 12px;">Huesos:</label>
+            <div id="bonesList" style="max-height: 120px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; padding: 6px;"></div>
+          </div>
+          <button id="btnDeleteBone" style="width: 100%; padding: 6px; background: var(--danger, #ff6b6b); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Eliminar Seleccionado</button>
+        </div>
+      </aside>
+    </main>
+
+    <!-- ===== BOTTOM: Animation Timeline ===== -->
+    <footer id="timeline">
+      <div class="timeline-controls">
+        <button class="timeline-btn" id="btnFirstFrame" title="Primer frame">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="11,19 2,12 11,5" />
+            <line x1="7" y1="12" x2="22" y2="12" />
+          </svg>
+        </button>
+        <button class="timeline-btn" id="btnPrevFrame" title="Frame anterior">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="15,18 9,12 15,6" />
+          </svg>
+        </button>
+        <button class="timeline-btn play-btn" id="btnPlayPause" title="Reproducir / Pausar (Espacio)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" id="playIcon">
+            <polygon points="5,3 19,12 5,21" />
+          </svg>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" id="pauseIcon" style="display:none">
+            <rect x="4" y="3" width="6" height="18" />
+            <rect x="14" y="3" width="6" height="18" />
+          </svg>
+        </button>
+        <button class="timeline-btn" id="btnNextFrame" title="Frame siguiente">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="9,18 15,12 9,6" />
+          </svg>
+        </button>
+        <button class="timeline-btn" id="btnLastFrame" title="Último frame">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="13,19 22,12 13,5" />
+            <line x1="17" y1="12" x2="2" y2="12" />
+          </svg>
+        </button>
+
+        <div class="toolbar-divider"></div>
+
+        <div class="fps-control">
+          <label>FPS:</label>
+          <input type="number" id="fpsInput" min="1" max="60" value="8" />
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <span id="frameCounter">Frame 1 / 1</span>
+      </div>
+
+      <div id="framesContainer">
+        <div id="framesList"></div>
+        <button class="add-frame-btn" id="btnAddFrame" title="Agregar frame">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+        </button>
+      </div>
+
+      <!-- Animation preview -->
+      <div id="animPreview">
+        <canvas id="animPreviewCanvas"></canvas>
+        <span>Preview</span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Text Tool Dialog -->
+  <div id="textDialog" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); background:white; padding:20px; border-radius:8px; z-index:2000; box-shadow:0 4px 20px rgba(0,0,0,0.3); min-width:300px;">
+    <div style="margin-bottom:15px;">
+      <label style="display:block; margin-bottom:5px; font-weight:bold;">Texto:</label>
+      <input type="text" id="textInput" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;" />
+    </div>
+    <div style="margin-bottom:15px;">
+      <label style="display:block; margin-bottom:5px; font-weight:bold;">Fuente:</label>
+      <select id="textFont" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        <option value="Arial">Arial</option>
+        <option value="Courier">Courier</option>
+        <option value="Times">Times New Roman</option>
+        <option value="Impact">Impact</option>
+        <option value="">Monoespaciada</option>
+      </select>
+    </div>
+    <div style="margin-bottom:15px;">
+      <label style="display:block; margin-bottom:5px; font-weight:bold;">Tamaño:</label>
+      <select id="textSize" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        <option value="8">8px</option>
+        <option value="12">12px</option>
+        <option value="16">16px</option>
+        <option value="24">24px</option>
+        <option value="32">32px</option>
+      </select>
+      <label style="display:block; margin-top:8px; margin-bottom:5px; font-weight:bold;">Tamaño personalizado (px):</label>
+      <input type="number" id="textCustomSize" min="4" max="256" step="1" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;" placeholder="O ingresa un tamaño custom aquí" />
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end;">
+      <button id="btnCancelText" style="padding:8px 16px; border:1px solid #ccc; border-radius:4px; cursor:pointer;">Cancelar</button>
+      <button id="btnInsertText" style="padding:8px 16px; background:#6366f1; color:white; border:none; border-radius:4px; cursor:pointer;">Insertar</button>
+    </div>
+  </div>
+
+  <!-- Text Dialog Overlay -->
+  <div id="textDialogOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.3); z-index:1999;"></div>
+
+  <!-- Save As Dialog -->
+  <div id="saveAsDialog" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); background:white; padding:20px; border-radius:8px; z-index:2000; box-shadow:0 4px 20px rgba(0,0,0,0.3); min-width:300px;">
+    <div style="margin-bottom:20px;">
+      <label style="display:block; margin-bottom:10px; font-weight:bold; font-size:16px;">Elige formato de guardado:</label>
+      <div style="display:flex; gap:10px; flex-direction:column;">
+        <button id="btnSaveAsPNG" style="padding:12px; background:#6366f1; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">💾 Guardar como PNG</button>
+        <button id="btnSaveAsJPEG" style="padding:12px; background:#8b5cf6; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">💾 Guardar como JPEG</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end;">
+      <button id="btnCancelSaveAs" style="padding:8px 16px; border:1px solid #ccc; border-radius:4px; cursor:pointer;">Cancelar</button>
+    </div>
+  </div>
+
+  <!-- Save As Dialog Overlay -->
+  <div id="saveAsDialogOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.3); z-index:1999;"></div>
+
+  <script type="module" src="./src/renderer.js"></script>
+</body>
+
+</html>
