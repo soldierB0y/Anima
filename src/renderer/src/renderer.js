@@ -96,7 +96,7 @@ class Project {
     return {
       name: name,
       canvas: layerCanvas,
-      ctx: layerCanvas.getContext('2d'),
+      ctx: getContext2D(layerCanvas),
       visible: true,
       opacity: 1,
     }
@@ -112,17 +112,30 @@ const appState = {
 let state = null
 
 // ==========================================
+// HELPER: GET CANVAS CONTEXT WITH PROPER OPTIONS
+// ==========================================
+function getContext2D(canvas) {
+  const ctx = canvas.getContext('2d', {
+    willReadFrequently: true,
+    colorSpace: 'srgb',
+    alpha: true
+  })
+  ctx.imageSmoothingEnabled = false
+  return ctx
+}
+
+// ==========================================
 // DOM ELEMENTS
 // ==========================================
 const $ = (sel) => document.querySelector(sel)
 const $$ = (sel) => document.querySelectorAll(sel)
 
 const canvas = $('#pixelCanvas')
-const ctx = canvas.getContext('2d')
+const ctx = getContext2D(canvas)
 const gridOverlay = $('#gridOverlay')
-const gridCtx = gridOverlay.getContext('2d')
+const gridCtx = getContext2D(gridOverlay)
 const previewOverlay = $('#previewOverlay')
-const previewCtx = previewOverlay.getContext('2d')
+const previewCtx = getContext2D(previewOverlay)
 
 const canvasWrapper = $('#canvasWrapper')
 const canvasContainer = $('#canvasContainer')
@@ -147,7 +160,7 @@ const framesList = $('#framesList')
 const frameCounter = $('#frameCounter')
 const fpsInput = $('#fpsInput')
 const animPreviewCanvas = $('#animPreviewCanvas')
-const animPreviewCtx = animPreviewCanvas.getContext('2d')
+const animPreviewCtx = getContext2D(animPreviewCanvas)
 
 // Drawing state (Global for active canvas interaction)
 const drawingState = {
@@ -466,7 +479,7 @@ function createLayer(name) {
   return {
     name: name || `Capa ${state.layers.length + 1}`,
     canvas: layerCanvas,
-    ctx: layerCanvas.getContext('2d'),
+    ctx: getContext2D(layerCanvas),
     visible: true,
     opacity: 1,
   }
@@ -529,8 +542,7 @@ function renderLayersList() {
     thumb.className = 'layer-thumb'
     thumb.width = 32
     thumb.height = 32
-    const thumbCtx = thumb.getContext('2d')
-    thumbCtx.imageSmoothingEnabled = false
+    const thumbCtx = getContext2D(thumb)
     thumbCtx.drawImage(layer.canvas, 0, 0, 32, 32)
 
     // Name
@@ -680,8 +692,7 @@ function renderFramesList() {
     const fc = document.createElement('canvas')
     fc.width = state.width
     fc.height = state.height
-    const fctx = fc.getContext('2d')
-    fctx.imageSmoothingEnabled = false
+    const fctx = getContext2D(fc)
 
     // Composite all layers for this frame
     for (let li = frameLayers.length - 1; li >= 0; li--) {
@@ -779,9 +790,8 @@ function updateFrameThumbnail() {
 
   const fc = thumbs[state.currentFrameIndex].querySelector('canvas')
   if (!fc) return
-  const fctx = fc.getContext('2d')
+  const fctx = getContext2D(fc)
   fctx.clearRect(0, 0, fc.width, fc.height)
-  fctx.imageSmoothingEnabled = false
 
   for (let i = state.layers.length - 1; i >= 0; i--) {
     const layer = state.layers[i]
@@ -1083,7 +1093,7 @@ function copySelectionToClipboard() {
   drawingState.clipboardCanvas = document.createElement('canvas')
   drawingState.clipboardCanvas.width = rect.w
   drawingState.clipboardCanvas.height = rect.h
-  const clipCtx = drawingState.clipboardCanvas.getContext('2d')
+  const clipCtx = getContext2D(drawingState.clipboardCanvas)
   clipCtx.drawImage(layer.canvas, -rect.x, -rect.y)
 
   drawingState.pasteStartX = rect.x
@@ -1185,7 +1195,7 @@ function hideTextDialog() {
 function renderTextToBitmap(text, font, size) {
   // Create a temporary canvas for text measurement
   const tempCanvas = document.createElement('canvas')
-  const tempCtx = tempCanvas.getContext('2d')
+  const tempCtx = getContext2D(tempCanvas)
 
   const fontSize = parseInt(size)
   const fontFamily = font || 'monospace'
@@ -1198,7 +1208,7 @@ function renderTextToBitmap(text, font, size) {
   const textCanvas = document.createElement('canvas')
   textCanvas.width = width
   textCanvas.height = height
-  const ctx = textCanvas.getContext('2d')
+  const ctx = getContext2D(textCanvas)
   ctx.font = `${fontSize}px ${fontFamily}`
   ctx.fillStyle = state.currentColor
   ctx.fillText(text, 2, fontSize + 1)
@@ -1214,7 +1224,7 @@ function saveUndoState() {
     const copyCanvas = document.createElement('canvas')
     copyCanvas.width = state.width
     copyCanvas.height = state.height
-    const copyCtx = copyCanvas.getContext('2d')
+    const copyCtx = getContext2D(copyCanvas)
     copyCtx.drawImage(l.canvas, 0, 0)
     return {
       name: l.name,
@@ -1244,7 +1254,7 @@ function undo() {
     const copyCanvas = document.createElement('canvas')
     copyCanvas.width = state.width
     copyCanvas.height = state.height
-    copyCanvas.getContext('2d').drawImage(l.canvas, 0, 0)
+    getContext2D(copyCanvas).drawImage(l.canvas, 0, 0)
     return { name: l.name, canvas: copyCanvas, visible: l.visible, opacity: l.opacity }
   })
   state.redoStack.push({
@@ -1263,7 +1273,7 @@ function redo() {
     const copyCanvas = document.createElement('canvas')
     copyCanvas.width = state.width
     copyCanvas.height = state.height
-    copyCanvas.getContext('2d').drawImage(l.canvas, 0, 0)
+    getContext2D(copyCanvas).drawImage(l.canvas, 0, 0)
     return { name: l.name, canvas: copyCanvas, visible: l.visible, opacity: l.opacity }
   })
   state.undoStack.push({
@@ -1525,7 +1535,7 @@ function setupEventListeners() {
     drawingState.clipboardCanvas = document.createElement('canvas')
     drawingState.clipboardCanvas.width = rect.w
     drawingState.clipboardCanvas.height = rect.h
-    const clipCtx = drawingState.clipboardCanvas.getContext('2d')
+    const clipCtx = getContext2D(drawingState.clipboardCanvas)
     clipCtx.drawImage(layer.canvas, -rect.x, -rect.y)
     drawingState.pasteMode = true
     drawingState.pasteStartX = rect.x
@@ -1838,7 +1848,7 @@ function onCanvasMouseDown(e) {
       const moveCanvas = document.createElement('canvas')
       moveCanvas.width = state.width
       moveCanvas.height = state.height
-      moveCanvas.getContext('2d').drawImage(layer.canvas, 0, 0)
+      getContext2D(moveCanvas).drawImage(layer.canvas, 0, 0)
       drawingState.moveLayerData = moveCanvas
       break
 
@@ -1875,8 +1885,7 @@ function onCanvasMouseDown(e) {
           drawingState.draggedPixelsCanvas = document.createElement('canvas')
           drawingState.draggedPixelsCanvas.width = dragRect.w
           drawingState.draggedPixelsCanvas.height = dragRect.h
-          const dragCtx = drawingState.draggedPixelsCanvas.getContext('2d')
-          dragCtx.imageSmoothingEnabled = false
+          const dragCtx = getContext2D(drawingState.draggedPixelsCanvas)
 
           // Copy only selected pixels
           const layerImageData = layer.ctx.getImageData(dragRect.x, dragRect.y, dragRect.w, dragRect.h)
@@ -2624,12 +2633,11 @@ function resizeAllCanvases(newW, newH) {
       const tempCanvas = document.createElement('canvas')
       tempCanvas.width = oldW
       tempCanvas.height = oldH
-      tempCanvas.getContext('2d').drawImage(layer.canvas, 0, 0)
+      getContext2D(tempCanvas).drawImage(layer.canvas, 0, 0)
 
       layer.canvas.width = newW
       layer.canvas.height = newH
-      layer.ctx = layer.canvas.getContext('2d')
-      layer.ctx.imageSmoothingEnabled = false
+      layer.ctx = getContext2D(layer.canvas)
       layer.ctx.drawImage(tempCanvas, 0, 0)
     })
   })
@@ -2707,7 +2715,7 @@ function exportPNG() {
   const exportCanvas = document.createElement('canvas')
   exportCanvas.width = state.width
   exportCanvas.height = state.height
-  const ectx = exportCanvas.getContext('2d')
+  const ectx = getContext2D(exportCanvas)
 
   for (let i = state.layers.length - 1; i >= 0; i--) {
     if (!state.layers[i].visible) continue
@@ -2726,7 +2734,7 @@ function exportJPEG() {
   const exportCanvas = document.createElement('canvas')
   exportCanvas.width = state.width
   exportCanvas.height = state.height
-  const ectx = exportCanvas.getContext('2d')
+  const ectx = getContext2D(exportCanvas)
 
   // JPEG needs a background color (usually white)
   ectx.fillStyle = '#ffffff'
@@ -2751,8 +2759,7 @@ function exportSpritesheet() {
   const sheetCanvas = document.createElement('canvas')
   sheetCanvas.width = state.width * cols
   sheetCanvas.height = state.height * rows
-  const sctx = sheetCanvas.getContext('2d')
-  sctx.imageSmoothingEnabled = false
+  const sctx = getContext2D(sheetCanvas)
 
   state.frames.forEach((frameLayers, idx) => {
     const fx = (idx % cols) * state.width
