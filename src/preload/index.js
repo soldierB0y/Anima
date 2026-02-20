@@ -4,6 +4,9 @@ import { electronAPI } from '@electron-toolkit/preload'
 // Custom APIs for renderer
 const api = {
   showSaveDialog: (options) => ipcRenderer.invoke('dialog:showSaveDialog', options),
+  showOpenDialog: (options) => ipcRenderer.invoke('dialog:showOpenDialog', options),
+  readFile: (filePath) => ipcRenderer.invoke('file:readFile', filePath),
+  readFileBase64: (filePath) => ipcRenderer.invoke('file:readFileBase64', filePath),
   writeFile: (filePath, content) => ipcRenderer.invoke('file:writeFile', filePath, content)
 }
 

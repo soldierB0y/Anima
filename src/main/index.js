@@ -64,6 +64,37 @@ app.whenReady().then(() => {
     return dialog.showSaveDialog(win, options)
   })
 
+  // Open dialog
+  ipcMain.handle('dialog:showOpenDialog', async (_event, options) => {
+    const win = BrowserWindow.getFocusedWindow()
+    return dialog.showOpenDialog(win, options)
+  })
+
+  // Read file from disk
+  ipcMain.handle('file:readFile', async (_event, filePath) => {
+    try {
+      const { readFileSync } = require('fs')
+      const content = readFileSync(filePath, 'utf-8')
+      return { success: true, content }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  })
+
+  // Read file as base64
+  ipcMain.handle('file:readFileBase64', async (_event, filePath) => {
+    try {
+      const { readFileSync } = require('fs')
+      const buffer = readFileSync(filePath)
+      const base64 = buffer.toString('base64')
+      const ext = filePath.split('.').pop().toLowerCase()
+      const mime = ext === 'png' ? 'image/png' : 'image/jpeg'
+      return { success: true, dataUrl: `data:${mime};base64,${base64}` }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  })
+
   // Write file to disk
   ipcMain.handle('file:writeFile', async (_event, filePath, content) => {
     try {

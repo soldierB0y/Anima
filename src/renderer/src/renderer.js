@@ -4611,45 +4611,48 @@ function resizeAllCanvases(newW, newH) {
 // ==========================================
 // FILE OPERATIONS
 // ==========================================
-function openProjectFile() {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = '.anima,application/json,image/png,image/jpeg'
-  input.onchange = (e) => {
-    const file = e.target.files[0]
-    if (!file) return
+async function openProjectFile() {
+  // Usar diálogo nativo de Electron para obtener ruta completa
+  const dialogResult = await window.api.showOpenDialog({
+    title: 'Abrir proyecto',
+    filters: [
+      { name: 'Todos soportados', extensions: ['anima', 'json', 'png', 'jpg', 'jpeg'] },
+      { name: 'Anima Project', extensions: ['anima', 'json'] },
+      { name: 'Images', extensions: ['png', 'jpg', 'jpeg'] }
+    ],
+    properties: ['openFile']
+  })
+  if (dialogResult.canceled || !dialogResult.filePaths || dialogResult.filePaths.length === 0) return
 
-    const isAnima = file.name.toLowerCase().endsWith('.anima') || file.type === 'application/json'
-    if (isAnima) {
-      file.text().then((txt) => {
-        try {
-          const data = JSON.parse(txt)
-          importAnimaData(data, file.name, file.path || null)
-        } catch (err) {
-          console.error('Error al cargar .anima', err)
-        }
-      })
-    } else {
-      const reader = new FileReader()
-      reader.onload = (event) => {
-        const img = new Image()
-        img.onload = () => {
-          // Create project from image
-          createNewProject(file.name, img.width, img.height)
-          // Draw image onto the initial layer at the project origin
-          const allLayers = getAllLayers(state.layers)
-          const layer = allLayers[0]
-          layer.ctx.drawImage(img, OVERFLOW_MARGIN, OVERFLOW_MARGIN)
-          compositeAndDisplay()
-          renderLayersList()
-          renderFramesList()
-        }
-        img.src = event.target.result
-      }
-      reader.readAsDataURL(file)
+  const filePath = dialogResult.filePaths[0]
+  const fileName = filePath.split(/[\\/]/).pop()
+  const isAnima = fileName.toLowerCase().endsWith('.anima') || fileName.toLowerCase().endsWith('.json')
+
+  if (isAnima) {
+    const fileResult = await window.api.readFile(filePath)
+    if (!fileResult.success) { console.error('Error al leer archivo:', fileResult.error); return }
+    try {
+      const data = JSON.parse(fileResult.content)
+      await importAnimaData(data, fileName, filePath)
+    } catch (err) {
+      console.error('Error al cargar .anima', err)
     }
+  } else {
+    // Cargar imagen usando IPC
+    const imgResult = await window.api.readFileBase64(filePath)
+    if (!imgResult.success) { console.error('Error al leer imagen:', imgResult.error); return }
+    const img = new Image()
+    img.onload = () => {
+      createNewProject(fileName, img.width, img.height)
+      const allLayers = getAllLayers(state.layers)
+      const layer = allLayers[0]
+      layer.ctx.drawImage(img, OVERFLOW_MARGIN, OVERFLOW_MARGIN)
+      compositeAndDisplay()
+      renderLayersList()
+      renderFramesList()
+    }
+    img.src = imgResult.dataUrl
   }
-  input.click()
 }
 
 function showSaveAsMenu() {
