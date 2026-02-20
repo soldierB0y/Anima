@@ -1,9 +1,9 @@
 {
   "name": "anima",
   "version": "1.0.0",
-  "description": "A minimal Electron application with JavaScript",
+  "description": "Software for pixel art animation",
   "main": "./out/main/index.js",
-  "author": "example.com",
+  "author": "SoldierB0y",
   "homepage": "https://electron-vite.org",
   "scripts": {
     "format": "prettier --write .",

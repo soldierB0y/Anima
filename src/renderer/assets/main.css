@@ -636,36 +636,37 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: #ffffff;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 24px;
   position: relative;
-  overflow: hidden;
-  /* Checkered background for transparency - LIGHT */
-  background-image: linear-gradient(45deg, #f5f5f5 25%, transparent 25%),
-    linear-gradient(-45deg, #f5f5f5 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #f5f5f5 75%),
-    linear-gradient(-45deg, transparent 75%, #f5f5f5 75%);
+  overflow: auto;
+  /* Neutral checkered background to contrast with canvas */
+  background-image: linear-gradient(45deg, #b0b0b8 25%, transparent 25%),
+    linear-gradient(-45deg, #b0b0b8 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #b0b0b8 75%),
+    linear-gradient(-45deg, transparent 75%, #b0b0b8 75%);
   background-size: 20px 20px;
   background-position:
     0 0,
     0 10px,
     10px -10px,
     -10px 0px;
-  background-color: #ffffff;
+  background-color: #c8c8cf;
 }
 
 #canvasWrapper {
   position: relative;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
-  box-shadow: 0 0 20px rgba(0, 0, 0, 0.1), 0 0 40px rgba(124, 92, 252, 0.03);
-  border: 1px solid var(--border-default);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0, 0, 0, 0.18);
+  border-radius: 1px;
 }
 
 #pixelCanvas,
 #gridOverlay,
-#previewOverlay {
+#previewOverlay,
+#rigOverlay {
   position: absolute;
   top: 0;
   left: 0;
@@ -681,6 +682,7 @@ body {
 #gridOverlay {
   pointer-events: none;
   z-index: 2;
+  image-rendering: auto;
 }
 
 #previewOverlay {
@@ -688,12 +690,15 @@ body {
   z-index: 3;
 }
 
+#rigOverlay {
+  pointer-events: none;
+  z-index: 4;
+  image-rendering: auto;
+}
+
 #canvasInfo {
-  position: absolute;
-  bottom: 8px;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
+  align-items: center;
   gap: 16px;
   padding: 4px 12px;
   background: rgba(10, 10, 15, 0.8);
@@ -702,24 +707,78 @@ body {
   border: 1px solid var(--border-subtle);
   font-size: 11px;
   color: var(--text-secondary);
-  z-index: 10;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* ========== LAYERS ========== */
 #layersList {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-height: 300px;
+  gap: 1px;
+  max-height: 400px;
   overflow-y: auto;
 }
 
+/* Tree children container */
+.layer-tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.layer-tree-children.collapsed {
+  display: none;
+}
+
+/* Base item row (layer or folder) */
 .layer-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: 6px;
+  padding: 5px 8px;
   border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: 1px solid transparent;
+  min-height: 36px;
+  position: relative;
+}
+
+/* Indentation levels via padding-left */
+.layer-item[data-depth="1"] { padding-left: 22px; }
+.layer-item[data-depth="2"] { padding-left: 36px; }
+.layer-item[data-depth="3"] { padding-left: 50px; }
+.layer-item[data-depth="4"] { padding-left: 64px; }
+.layer-item[data-depth="5"] { padding-left: 78px; }
+
+/* Folder expand/collapse arrow */
+.folder-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+
+.folder-arrow.collapsed {
+  transform: rotate(-90deg);
+}
+
+/* Folder icon */
+.folder-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
   cursor: pointer;
   transition: all var(--transition-fast);
   border: 1px solid transparent;
@@ -735,8 +794,11 @@ body {
   box-shadow: 0 0 8px var(--accent-glow);
 }
 
-.layer-item.dragging {
-  opacity: 0.5;
+.layer-item.multi-selected {
+  background: var(--bg-hover);
+  border-color: rgba(99, 102, 241, 0.55);
+  outline: 1px dashed var(--accent);
+  outline-offset: -2px;
 }
 
 .layer-thumb {
@@ -806,6 +868,46 @@ body {
 .layer-visibility.hidden {
   color: var(--text-muted);
   opacity: 0.4;
+}
+
+/* Drag and drop indicators */
+.layer-item.drag-over-top {
+  border-top: 2px solid var(--accent) !important;
+}
+
+.layer-item.drag-over-bottom {
+  border-bottom: 2px solid var(--accent) !important;
+}
+
+.layer-item.drag-over-inside {
+  background: var(--accent-glow) !important;
+  border-color: var(--accent) !important;
+}
+
+.layer-item.dragging {
+  opacity: 0.4;
+}
+
+/* Folder-specific styles */
+.layer-item.folder-item {
+  background: rgba(99, 102, 241, 0.04);
+}
+
+.layer-item.folder-item:hover {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.layer-item.folder-item.active {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+.layer-item.folder-item.multi-selected {
+  background: rgba(99, 102, 241, 0.1);
+  border-color: rgba(99, 102, 241, 0.55);
+  outline: 1px dashed var(--accent);
+  outline-offset: -2px;
 }
 
 /* Opacity Slider */

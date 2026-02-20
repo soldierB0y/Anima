@@ -1,5 +1,5 @@
 /* ========================================
-   ANIMA — Pixel Art Studio
+   ANIMA � Pixel Art Studio
    Main Renderer Logic
    ======================================== */
 
@@ -34,13 +34,22 @@ const DEFAULT_PALETTE = [
 ]
 
 // ==========================================
+// OVERFLOW MARGIN � allows drawing outside project bounds
+// ==========================================
+const OVERFLOW_MARGIN = 64
+
+function totalW() { return state ? state.width + 2 * OVERFLOW_MARGIN : 2 * OVERFLOW_MARGIN }
+function totalH() { return state ? state.height + 2 * OVERFLOW_MARGIN : 2 * OVERFLOW_MARGIN }
+
+// ==========================================
 // STATE & PROJECT MANAGEMENT
 // ==========================================
 
 class Project {
-  constructor(name = 'Sin título', width = 16, height = 16) {
+  constructor(name = 'Sin t�tulo', width = 16, height = 16) {
     this.id = Date.now() + Math.random().toString(36).substr(2, 9)
     this.name = name
+    this.fileName = null  // .anima destino actual
     this.width = width
     this.height = height
     this.zoom = 1
@@ -54,9 +63,10 @@ class Project {
     this.showGrid = true
     this.onionSkin = false
 
-    // Layers
+    // Layers (tree structure: array of layers and folders)
     this.layers = []
-    this.activeLayerIndex = 0
+    this.activeLayerId = null
+    this.selectedLayerIds = new Set()  // IDs of additionally selected layers (multi-selection)
 
     // Frames / Animation
     this.frames = []
@@ -75,6 +85,12 @@ class Project {
       boneColors: {},  // Map of boneId -> color
       rigMode: 'create',  // 'create', 'paint', 'animate'
       selectedBoneId: null,
+      boneWeights: {},  // Map of "x,y" -> boneId  (pixel-to-bone assignment)
+      originalBones: null,  // Snapshot of bones at drag start (current drag)
+      originalPixels: null,  // Snapshot of layer ImageData at drag start
+      baseBones: null,       // Clean snapshot of bones before ANY deformation
+      basePixels: null,      // Clean snapshot of pixels before ANY deformation
+      baseBoneWeights: null, // Clean snapshot of bone weights before ANY deformation
     }
 
     // Initialize with one frame and one layer
@@ -85,20 +101,34 @@ class Project {
     const layer = this.createLayer('Capa 1')
     this.layers = [layer]
     this.frames = [[layer]]
-    this.activeLayerIndex = 0
+    this.activeLayerId = layer.id
     this.currentFrameIndex = 0
   }
 
   createLayer(name) {
     const layerCanvas = document.createElement('canvas')
-    layerCanvas.width = this.width
-    layerCanvas.height = this.height
+    layerCanvas.width = this.width + 2 * OVERFLOW_MARGIN
+    layerCanvas.height = this.height + 2 * OVERFLOW_MARGIN
     return {
+      id: generateId(),
+      type: 'layer',
       name: name,
       canvas: layerCanvas,
-      ctx: layerCanvas.getContext('2d', { alpha: false }),
+      ctx: layerCanvas.getContext('2d'),
       visible: true,
       opacity: 1,
+    }
+  }
+
+  createFolder(name) {
+    return {
+      id: generateId(),
+      type: 'folder',
+      name: name,
+      children: [],
+      visible: true,
+      opacity: 1,
+      expanded: true,
     }
   }
 }
@@ -118,11 +148,13 @@ const $ = (sel) => document.querySelector(sel)
 const $$ = (sel) => document.querySelectorAll(sel)
 
 const canvas = $('#pixelCanvas')
-const ctx = canvas.getContext('2d', { alpha: false })
+const ctx = canvas.getContext('2d')
 const gridOverlay = $('#gridOverlay')
-const gridCtx = gridOverlay.getContext('2d', { alpha: false })
+const gridCtx = gridOverlay.getContext('2d')
 const previewOverlay = $('#previewOverlay')
-const previewCtx = previewOverlay.getContext('2d', { alpha: false })
+const previewCtx = previewOverlay.getContext('2d')
+const rigOverlay = $('#rigOverlay')
+const rigCtx = rigOverlay.getContext('2d')
 
 const canvasWrapper = $('#canvasWrapper')
 const canvasContainer = $('#canvasContainer')
@@ -147,7 +179,7 @@ const framesList = $('#framesList')
 const frameCounter = $('#frameCounter')
 const fpsInput = $('#fpsInput')
 const animPreviewCanvas = $('#animPreviewCanvas')
-const animPreviewCtx = animPreviewCanvas.getContext('2d', { alpha: false })
+const animPreviewCtx = animPreviewCanvas.getContext('2d')
 
 // Drawing state (Global for active canvas interaction)
 const drawingState = {
@@ -160,6 +192,7 @@ const drawingState = {
   circleRightClick: false,
   moveStart: null,
   moveLayerData: null,
+  moveAllLayersData: null,  // [{layer, canvas}] for multi-layer move
   pixelSize: 1,
   animInterval: null,
   userPalette: [],
@@ -184,11 +217,31 @@ const drawingState = {
   dragStartRectX: 0,
   dragStartRectY: 0,
   draggedPixelsImageData: null,  // Store pixels being dragged
-  draggedPixelsCanvas: null,  // Canvas to hold dragged pixels
+  draggedPixelsCanvas: null,  // Canvas to hold dragged pixels (active layer)
+  draggedAllLayersData: null, // [{layer, canvas}] selected pixels per selected layer
+  // Panning (hand tool)
+  isPanning: false,
+  panStartX: 0,
+  panStartY: 0,
+  panScrollLeft: 0,
+  panScrollTop: 0,
   // Rigging tool
   rigBoneStart: null,
+  rigParentBoneId: null,
+  rigDragJoint: null,  // { bone, endpoint: 'start'|'end' } for animate mode dragging
+  rigPainting: false,  // true when painting bone weights
+  rigAnimating: false, // true when dragging a joint in animate mode
   // Color swapping: tracks which color to use for current brush stroke
   paintColor: null,  // null means use state.currentColor, otherwise use this color
+  // Mirror drawing
+  mirrorH: false,  // horizontal mirror (left <-> right)
+  mirrorV: false,  // vertical mirror (top <-> bottom)
+  mirrorLastPixelX: -1,
+  mirrorLastPixelY: -1,
+  mirrorLastPixelX2: -1,  // for V mirror tracking
+  mirrorLastPixelY2: -1,
+  mirrorLastPixelX3: -1,  // for H+V combined
+  mirrorLastPixelY3: -1,
 }
 
 // ==========================================
@@ -240,14 +293,13 @@ function createNewProject(name = 'Nuevo Dibujo', width = 16, height = 16) {
 // CANVAS SETUP
 // ==========================================
 function initCanvas() {
-  const w = state.width
-  const h = state.height
-  canvas.width = w
-  canvas.height = h
-  gridOverlay.width = w
-  gridOverlay.height = h
-  previewOverlay.width = w
-  previewOverlay.height = h
+  const tW = totalW()
+  const tH = totalH()
+  canvas.width = tW
+  canvas.height = tH
+  // Grid overlay size is set in recalcCanvasSize at display resolution
+  previewOverlay.width = tW
+  previewOverlay.height = tH
 
   recalcCanvasSize()
 }
@@ -255,33 +307,53 @@ function initCanvas() {
 function recalcCanvasSize() {
   if (!state) return
   const containerRect = canvasContainer.getBoundingClientRect()
+  const tW = totalW()
+  const tH = totalH()
   
   const availableW = containerRect.width - 64
   const availableH = containerRect.height - 64
   
-  // Find the largest integer pixel size that fits in the available space
-  let pixelSize = Math.floor(Math.min(availableW / state.width, availableH / state.height))
+  // Base pixel size that fits in the container
+  let pixelSize = Math.floor(Math.min(availableW / tW, availableH / tH))
   if (pixelSize < 1) pixelSize = 1 
   
-  drawingState.pixelSize = pixelSize
+  // Effective scale must be an integer so every canvas pixel maps to
+  // exactly N×N screen pixels. This prevents sub-pixel misalignment
+  // between the CSS-scaled pixelCanvas and the display-res gridOverlay.
+  let effectiveScale = Math.max(1, Math.round(pixelSize * state.zoom))
   
-  const baseW = state.width * pixelSize
-  const baseH = state.height * pixelSize
+  drawingState.pixelSize = effectiveScale
   
-  const finalW = Math.round(baseW * state.zoom)
-  const finalH = Math.round(baseH * state.zoom)
+  const finalW = tW * effectiveScale
+  const finalH = tH * effectiveScale
 
   canvasWrapper.style.width = finalW + 'px'
   canvasWrapper.style.height = finalH + 'px'
 
   canvas.style.width = finalW + 'px'
   canvas.style.height = finalH + 'px'
+
+  // Grid overlay at display resolution for crisp 1px lines
+  gridOverlay.width = finalW
+  gridOverlay.height = finalH
   gridOverlay.style.width = finalW + 'px'
   gridOverlay.style.height = finalH + 'px'
+
+  // Rig overlay at display resolution for visible bones
+  rigOverlay.width = finalW
+  rigOverlay.height = finalH
+  rigOverlay.style.width = finalW + 'px'
+  rigOverlay.style.height = finalH + 'px'
+
   previewOverlay.style.width = finalW + 'px'
   previewOverlay.style.height = finalH + 'px'
 
   drawGrid()
+
+  // Re-render rig if in rig mode
+  if (state && state.currentTool === 'rig') {
+    renderRigVisualization()
+  }
 }
 
 // ==========================================
@@ -339,9 +411,10 @@ function switchProject(index) {
   $('#canvasHeight').value = state.height
 
   // Sync layer opacity slider with active layer
-  if (state.layers[state.activeLayerIndex]) {
-    layerOpacitySlider.value = state.layers[state.activeLayerIndex].opacity * 100
-    opacityValueLabel.textContent = Math.round(state.layers[state.activeLayerIndex].opacity * 100) + '%'
+  const _activeLayer = getActiveLayer()
+  if (_activeLayer) {
+    layerOpacitySlider.value = _activeLayer.opacity * 100
+    opacityValueLabel.textContent = Math.round(_activeLayer.opacity * 100) + '%'
   }
 
   // Update secondary color UI
@@ -397,7 +470,6 @@ function buildDefaultPalette() {
     swatch.title = color
     swatch.addEventListener('click', () => {
       setCurrentColor(color)
-      addToUserPalette(color)
     })
     defaultPaletteEl.appendChild(swatch)
   })
@@ -414,8 +486,8 @@ function setCurrentColor(color) {
     colorPreviewSwatch.style.backgroundColor = color
     colorHexLabel.textContent = color.toUpperCase()
     colorPickerInput.value = color
-    // Automatically add to user palette when a color is selected
-    addToUserPalette(color)
+    // Debounced add to user palette (waits 5s after last color change)
+    addToUserPaletteDebounced(color)
   }
 
   // Highlight active swatch
@@ -429,17 +501,28 @@ function setCurrentColor(color) {
 
 function addToUserPalette(color) {
   if (color === 'transparent') return
-  if (state.userPalette.includes(color)) return
+  if (drawingState.userPalette.includes(color)) return
 
-  state.userPalette.push(color)
+  drawingState.userPalette.push(color)
   renderUserPalette()
+}
+
+// Debounced version: waits 5 seconds after last color picker interaction
+let _paletteDebounceTimer = null
+function addToUserPaletteDebounced(color) {
+  if (color === 'transparent') return
+  if (_paletteDebounceTimer) clearTimeout(_paletteDebounceTimer)
+  _paletteDebounceTimer = setTimeout(() => {
+    addToUserPalette(color)
+    _paletteDebounceTimer = null
+  }, 5000)
 }
 
 function renderUserPalette() {
   userPaletteEl.innerHTML = ''
-  userPaletteEmpty.style.display = state.userPalette.length === 0 ? 'block' : 'none'
+  userPaletteEmpty.style.display = drawingState.userPalette.length === 0 ? 'block' : 'none'
 
-  state.userPalette.forEach((color) => {
+  drawingState.userPalette.forEach((color) => {
     const swatch = document.createElement('div')
     swatch.className = 'color-swatch'
     swatch.style.backgroundColor = color
@@ -448,7 +531,7 @@ function renderUserPalette() {
     swatch.addEventListener('click', () => setCurrentColor(color))
     swatch.addEventListener('contextmenu', (e) => {
       e.preventDefault()
-      state.userPalette = state.userPalette.filter((c) => c !== color)
+      drawingState.userPalette = drawingState.userPalette.filter((c) => c !== color)
       renderUserPalette()
     })
     userPaletteEl.appendChild(swatch)
@@ -456,166 +539,771 @@ function renderUserPalette() {
 }
 
 // ==========================================
+// LAYER TREE HELPERS
+// ==========================================
+let _idCounter = 0
+function generateId() {
+  return 'id_' + Date.now().toString(36) + '_' + (++_idCounter).toString(36)
+}
+
+/**
+ * Flatten a layer tree into an ordered array of drawing layers only.
+ * Respects folder visibility: if a folder is hidden, all children are excluded.
+ * Order: top-to-bottom (first item = topmost layer).
+ */
+function getFlatLayers(items, parentVisible = true) {
+  const result = []
+  for (const item of items) {
+    const effectiveVisible = parentVisible && item.visible
+    if (item.type === 'folder') {
+      result.push(...getFlatLayers(item.children, effectiveVisible))
+    } else {
+      if (effectiveVisible) {
+        result.push(item)
+      }
+    }
+  }
+  return result
+}
+
+/**
+ * Get ALL layers (including hidden) from the tree, flat.
+ */
+function getAllLayers(items) {
+  const result = []
+  for (const item of items) {
+    if (item.type === 'folder') {
+      result.push(...getAllLayers(item.children))
+    } else {
+      result.push(item)
+    }
+  }
+  return result
+}
+
+/**
+ * Get ALL items (layers + folders) from the tree, flat.
+ */
+function getAllItems(items) {
+  const result = []
+  for (const item of items) {
+    result.push(item)
+    if (item.type === 'folder') {
+      result.push(...getAllItems(item.children))
+    }
+  }
+  return result
+}
+
+/**
+ * Find an item (layer or folder) by ID in the tree.
+ */
+function findItemById(items, id) {
+  for (const item of items) {
+    if (item.id === id) return item
+    if (item.type === 'folder') {
+      const found = findItemById(item.children, id)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+/**
+ * Find the parent array and index of an item by ID.
+ * Returns { parent: array, index: number } or null.
+ */
+function findParentAndIndex(items, id) {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return { parent: items, index: i }
+    if (items[i].type === 'folder') {
+      const found = findParentAndIndex(items[i].children, id)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+/**
+ * Remove an item from the tree by ID. Returns the removed item or null.
+ */
+function removeItemById(items, id) {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) {
+      return items.splice(i, 1)[0]
+    }
+    if (items[i].type === 'folder') {
+      const removed = removeItemById(items[i].children, id)
+      if (removed) return removed
+    }
+  }
+  return null
+}
+
+/**
+ * Get the active layer object (only if it's a drawing layer, not a folder).
+ */
+function getActiveLayer() {
+  if (!state || !state.activeLayerId) return null
+  const item = findItemById(state.layers, state.activeLayerId)
+  if (item && item.type === 'layer') return item
+  return null
+}
+
+/**
+ * Get all currently selected layers (active + multi-selected), only drawing layers.
+ */
+function getSelectedLayers() {
+  if (!state) return []
+  const ids = new Set([state.activeLayerId])
+  for (const id of (state.selectedLayerIds || [])) ids.add(id)
+  return getAllLayers(state.layers).filter(l => ids.has(l.id))
+}
+
+/**
+ * Get the active item (layer or folder).
+ */
+function getActiveItem() {
+  if (!state || !state.activeLayerId) return null
+  return findItemById(state.layers, state.activeLayerId)
+}
+
+/**
+ * Count all drawing layers (for auto-naming).
+ */
+function countAllLayers(items) {
+  return getAllLayers(items).length
+}
+
+/**
+ * Count all folders (for auto-naming).
+ */
+function countAllFolders(items) {
+  let count = 0
+  for (const item of items) {
+    if (item.type === 'folder') {
+      count += 1 + countAllFolders(item.children)
+    }
+  }
+  return count
+}
+
+/**
+ * Deep clone a layer tree (for frames/undo).
+ * Layers get new canvases with copied pixel data.
+ */
+function deepCloneTree(items, width, height) {
+  return items.map(item => {
+    if (item.type === 'folder') {
+      return {
+        id: item.id,
+        type: 'folder',
+        name: item.name,
+        children: deepCloneTree(item.children, width, height),
+        visible: item.visible,
+        opacity: item.opacity,
+        expanded: item.expanded,
+      }
+    } else {
+      const newCanvas = document.createElement('canvas')
+      newCanvas.width = width + 2 * OVERFLOW_MARGIN
+      newCanvas.height = height + 2 * OVERFLOW_MARGIN
+      const newCtx = newCanvas.getContext('2d')
+      newCtx.drawImage(item.canvas, 0, 0)
+      return {
+        id: item.id,
+        type: 'layer',
+        name: item.name,
+        canvas: newCanvas,
+        ctx: newCtx,
+        visible: item.visible,
+        opacity: item.opacity,
+      }
+    }
+  })
+}
+
+/**
+ * Snapshot a layer tree for undo/redo (copies canvas data).
+ */
+function snapshotTree(items) {
+  return items.map(item => {
+    if (item.type === 'folder') {
+      return {
+        id: item.id,
+        type: 'folder',
+        name: item.name,
+        children: snapshotTree(item.children),
+        visible: item.visible,
+        opacity: item.opacity,
+        expanded: item.expanded,
+      }
+    } else {
+      const copyCanvas = document.createElement('canvas')
+      copyCanvas.width = item.canvas.width
+      copyCanvas.height = item.canvas.height
+      copyCanvas.getContext('2d').drawImage(item.canvas, 0, 0)
+      return {
+        id: item.id,
+        type: 'layer',
+        name: item.name,
+        canvas: copyCanvas,
+        visible: item.visible,
+        opacity: item.opacity,
+      }
+    }
+  })
+}
+
+/**
+ * Restore a layer tree from a snapshot.
+ */
+function restoreTree(snapshot) {
+  return snapshot.map(s => {
+    if (s.type === 'folder') {
+      return {
+        id: s.id,
+        type: 'folder',
+        name: s.name,
+        children: restoreTree(s.children),
+        visible: s.visible,
+        opacity: s.opacity,
+        expanded: s.expanded,
+      }
+    } else {
+      const layerCanvas = document.createElement('canvas')
+      layerCanvas.width = s.canvas.width
+      layerCanvas.height = s.canvas.height
+      const layerCtx = layerCanvas.getContext('2d')
+      layerCtx.drawImage(s.canvas, 0, 0)
+      return {
+        id: s.id,
+        type: 'layer',
+        name: s.name,
+        canvas: layerCanvas,
+        ctx: layerCtx,
+        visible: s.visible,
+        opacity: s.opacity,
+      }
+    }
+  })
+}
+
+/**
+ * Resize all canvases in a tree.
+ */
+function resizeTreeCanvases(items, oldW, oldH, newW, newH) {
+  for (const item of items) {
+    if (item.type === 'folder') {
+      resizeTreeCanvases(item.children, oldW, oldH, newW, newH)
+    } else {
+      const tempCanvas = document.createElement('canvas')
+      tempCanvas.width = oldW + 2 * OVERFLOW_MARGIN
+      tempCanvas.height = oldH + 2 * OVERFLOW_MARGIN
+      tempCanvas.getContext('2d').drawImage(item.canvas, 0, 0)
+      item.canvas.width = newW + 2 * OVERFLOW_MARGIN
+      item.canvas.height = newH + 2 * OVERFLOW_MARGIN
+      item.ctx = item.canvas.getContext('2d')
+      item.ctx.imageSmoothingEnabled = false
+      item.ctx.drawImage(tempCanvas, 0, 0)
+    }
+  }
+}
+
+// ==========================================
 // LAYERS
 // ==========================================
 function createLayer(name) {
   const layerCanvas = document.createElement('canvas')
-  layerCanvas.width = state.width
-  layerCanvas.height = state.height
+  layerCanvas.width = totalW()
+  layerCanvas.height = totalH()
 
   return {
-    name: name || `Capa ${state.layers.length + 1}`,
+    id: generateId(),
+    type: 'layer',
+    name: name || `Capa ${countAllLayers(state.layers) + 1}`,
     canvas: layerCanvas,
-    ctx: layerCanvas.getContext('2d', { alpha: false }),
+    ctx: layerCanvas.getContext('2d'),
     visible: true,
     opacity: 1,
   }
 }
 
+function createFolder(name) {
+  return {
+    id: generateId(),
+    type: 'folder',
+    name: name || `Carpeta ${countAllFolders(state.layers) + 1}`,
+    children: [],
+    visible: true,
+    opacity: 1,
+    expanded: true,
+  }
+}
+
 function addLayer() {
   const layer = createLayer()
-  state.layers.push(layer)
-  state.activeLayerIndex = state.layers.length - 1
+  // Insert after the active item's position (same level)
+  const activeItem = getActiveItem()
+  if (activeItem) {
+    const loc = findParentAndIndex(state.layers, activeItem.id)
+    if (loc) {
+      loc.parent.splice(loc.index + 1, 0, layer)
+    } else {
+      state.layers.push(layer)
+    }
+  } else {
+    state.layers.push(layer)
+  }
+  state.activeLayerId = layer.id
+  renderLayersList()
+  compositeAndDisplay()
+}
+
+function addFolder() {
+  const folder = createFolder()
+  const activeItem = getActiveItem()
+  if (activeItem) {
+    const loc = findParentAndIndex(state.layers, activeItem.id)
+    if (loc) {
+      loc.parent.splice(loc.index + 1, 0, folder)
+    } else {
+      state.layers.push(folder)
+    }
+  } else {
+    state.layers.push(folder)
+  }
+  state.activeLayerId = folder.id
   renderLayersList()
   compositeAndDisplay()
 }
 
 function deleteLayer() {
-  if (state.layers.length <= 1) return
+  const allLayers = getAllLayers(state.layers)
+  if (allLayers.length <= 1 && !getActiveItem()) return
 
-  state.layers.splice(state.activeLayerIndex, 1)
-  if (state.activeLayerIndex >= state.layers.length) {
-    state.activeLayerIndex = state.layers.length - 1
+  const activeItem = getActiveItem()
+  if (!activeItem) return
+
+  // If deleting a folder, ensure at least one layer remains outside it
+  if (activeItem.type === 'folder') {
+    const layersInFolder = getAllLayers(activeItem.children)
+    const totalLayers = allLayers.length
+    if (totalLayers - layersInFolder.length < 1) return
+  } else {
+    if (allLayers.length <= 1) return
   }
+
+  // Find sibling or parent to select after deletion
+  const loc = findParentAndIndex(state.layers, activeItem.id)
+  removeItemById(state.layers, activeItem.id)
+
+  // Select next available item
+  const allItems = getAllItems(state.layers)
+  if (allItems.length > 0) {
+    // Try to select the item at the same position or previous
+    if (loc && loc.parent.length > 0) {
+      const newIdx = Math.min(loc.index, loc.parent.length - 1)
+      state.activeLayerId = loc.parent[newIdx].id
+    } else {
+      state.activeLayerId = allItems[0].id
+    }
+  }
+
   renderLayersList()
   compositeAndDisplay()
 }
 
 function mergeDown() {
-  if (state.activeLayerIndex >= state.layers.length - 1) return
+  const activeItem = getActiveItem()
+  if (!activeItem || activeItem.type !== 'layer') return
 
-  const top = state.layers[state.activeLayerIndex]
-  const bottom = state.layers[state.activeLayerIndex + 1]
+  const loc = findParentAndIndex(state.layers, activeItem.id)
+  if (!loc) return
 
-  bottom.ctx.globalAlpha = top.opacity
-  bottom.ctx.drawImage(top.canvas, 0, 0)
-  bottom.ctx.globalAlpha = 1
+  // Find the next layer below in the same parent
+  let bottomLayer = null
+  for (let i = loc.index + 1; i < loc.parent.length; i++) {
+    if (loc.parent[i].type === 'layer') {
+      bottomLayer = loc.parent[i]
+      break
+    }
+  }
+  if (!bottomLayer) return
 
-  state.layers.splice(state.activeLayerIndex, 1)
+  bottomLayer.ctx.globalAlpha = activeItem.opacity
+  bottomLayer.ctx.drawImage(activeItem.canvas, 0, 0)
+  bottomLayer.ctx.globalAlpha = 1
+
+  removeItemById(state.layers, activeItem.id)
+  state.activeLayerId = bottomLayer.id
   renderLayersList()
   compositeAndDisplay()
 }
 
-function setActiveLayer(index) {
-  state.activeLayerIndex = index
-  layerOpacitySlider.value = state.layers[index].opacity * 100
-  opacityValueLabel.textContent = Math.round(state.layers[index].opacity * 100) + '%'
+function setActiveLayer(id) {
+  state.activeLayerId = id
+  state.selectedLayerIds.clear()  // Clear multi-selection on normal layer activation
+  const item = findItemById(state.layers, id)
+  if (item && item.type === 'layer') {
+    layerOpacitySlider.value = item.opacity * 100
+    opacityValueLabel.textContent = Math.round(item.opacity * 100) + '%'
+  } else if (item && item.type === 'folder') {
+    layerOpacitySlider.value = item.opacity * 100
+    opacityValueLabel.textContent = Math.round(item.opacity * 100) + '%'
+  }
   renderLayersList()
 }
 
+// Currently dragged item ID for drag-and-drop
+let _draggedItemId = null
+
 function renderLayersList() {
   layersList.innerHTML = ''
+  _renderTreeItems(state.layers, layersList, 0)
 
-  // Render layers top to bottom (first in array = top)
-  for (let i = 0; i < state.layers.length; i++) {
-    const layer = state.layers[i]
-    const item = document.createElement('div')
-    item.className = 'layer-item' + (i === state.activeLayerIndex ? ' active' : '')
-    item.draggable = true
-    item.dataset.index = i
-
-    // Thumbnail
-    const thumb = document.createElement('canvas')
-    thumb.className = 'layer-thumb'
-    thumb.width = 32
-    thumb.height = 32
-    const thumbCtx = thumb.getContext('2d', { alpha: false })
-    thumbCtx.imageSmoothingEnabled = false
-    thumbCtx.drawImage(layer.canvas, 0, 0, 32, 32)
-
-    // Name
-    const nameEl = document.createElement('div')
-    nameEl.className = 'layer-name'
-    nameEl.textContent = layer.name
-    nameEl.addEventListener('dblclick', () => {
-      const input = document.createElement('input')
-      input.value = layer.name
-      nameEl.textContent = ''
-      nameEl.appendChild(input)
-      input.focus()
-      input.select()
-
-      const finish = () => {
-        layer.name = input.value || layer.name
-        nameEl.textContent = layer.name
-      }
-      input.addEventListener('blur', finish)
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') finish()
-      })
-    })
-
-    // Visibility toggle
-    const visBtn = document.createElement('button')
-    visBtn.className = 'layer-visibility' + (layer.visible ? '' : ' hidden')
-    visBtn.innerHTML = layer.visible
-      ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
-      : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
-    visBtn.addEventListener('click', (e) => {
-      e.stopPropagation()
-      layer.visible = !layer.visible
-      renderLayersList()
-      compositeAndDisplay()
-    })
-
-    item.appendChild(thumb)
-    item.appendChild(nameEl)
-    item.appendChild(visBtn)
-
-    item.addEventListener('click', () => setActiveLayer(i))
-
-    // Drag and drop for reordering
-    item.addEventListener('dragstart', (e) => {
-      e.dataTransfer.setData('text/plain', i.toString())
-      item.classList.add('dragging')
-    })
-    item.addEventListener('dragend', () => {
-      item.classList.remove('dragging')
-    })
-    item.addEventListener('dragover', (e) => {
-      e.preventDefault()
-    })
-    item.addEventListener('drop', (e) => {
-      e.preventDefault()
-      const fromIndex = parseInt(e.dataTransfer.getData('text/plain'))
-      const toIndex = i
-      if (fromIndex === toIndex) return
-
-      const [movedLayer] = state.layers.splice(fromIndex, 1)
-      state.layers.splice(toIndex, 0, movedLayer)
-
-      if (state.activeLayerIndex === fromIndex) {
-        state.activeLayerIndex = toIndex
-      } else if (fromIndex < state.activeLayerIndex && toIndex >= state.activeLayerIndex) {
-        state.activeLayerIndex--
-      } else if (fromIndex > state.activeLayerIndex && toIndex <= state.activeLayerIndex) {
-        state.activeLayerIndex++
-      }
-
-      renderLayersList()
-      compositeAndDisplay()
-    })
-
-    layersList.appendChild(item)
-  }
-
-  // Update opacity slider
-  if (state.layers[state.activeLayerIndex]) {
-    layerOpacitySlider.value = state.layers[state.activeLayerIndex].opacity * 100
-    opacityValueLabel.textContent =
-      Math.round(state.layers[state.activeLayerIndex].opacity * 100) + '%'
+  // Update opacity slider for active item
+  const activeItem = getActiveItem()
+  if (activeItem) {
+    layerOpacitySlider.value = (activeItem.opacity || 1) * 100
+    opacityValueLabel.textContent = Math.round((activeItem.opacity || 1) * 100) + '%'
   }
 }
+
+function _startRename(item, nameEl) {
+  const input = document.createElement('input')
+  input.value = item.name
+  nameEl.textContent = ''
+  nameEl.appendChild(input)
+  input.focus()
+  input.select()
+
+  let finished = false
+  const finish = () => {
+    if (finished) return
+    finished = true
+    item.name = input.value || item.name
+    nameEl.textContent = item.name
+  }
+  input.addEventListener('blur', finish)
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      finish()
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      nameEl.textContent = item.name
+      finished = true
+    }
+    e.stopPropagation()
+  })
+  input.addEventListener('click', (e) => e.stopPropagation())
+}
+
+function _renderTreeItems(items, container, depth) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+
+    if (item.type === 'folder') {
+      _renderFolderItem(item, container, depth)
+    } else {
+      _renderLayerItem(item, container, depth)
+    }
+  }
+}
+
+function _renderFolderItem(folder, container, depth) {
+  const row = document.createElement('div')
+  row.className = 'layer-item folder-item' + (folder.id === state.activeLayerId ? ' active' : '') + (state.selectedLayerIds.has(folder.id) ? ' multi-selected' : '')
+  row.draggable = true
+  row.dataset.id = folder.id
+  row.dataset.type = 'folder'
+  row.dataset.depth = depth
+
+  // Expand/collapse arrow
+  const arrow = document.createElement('div')
+  arrow.className = 'folder-arrow' + (folder.expanded ? '' : ' collapsed')
+  arrow.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>'
+  arrow.addEventListener('click', (e) => {
+    e.stopPropagation()
+    folder.expanded = !folder.expanded
+    renderLayersList()
+  })
+
+  // Folder icon
+  const folderIcon = document.createElement('div')
+  folderIcon.className = 'folder-icon'
+  folderIcon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
+
+  // Name
+  const nameEl = document.createElement('div')
+  nameEl.className = 'layer-name'
+  nameEl.textContent = folder.name
+  nameEl.addEventListener('dblclick', (e) => {
+    e.stopPropagation()
+    _startRename(folder, nameEl)
+  })
+
+  // Visibility toggle
+  const visBtn = _createVisibilityButton(folder)
+
+  row.appendChild(arrow)
+  row.appendChild(folderIcon)
+  row.appendChild(nameEl)
+  row.appendChild(visBtn)
+
+  row.addEventListener('click', (e) => {
+    if (e.altKey) {
+      // Alt+Click: remove from multi-selection
+      e.stopPropagation()
+      state.selectedLayerIds.delete(folder.id)
+      if (state.activeLayerId === folder.id) {
+        const remaining = [...state.selectedLayerIds]
+        if (remaining.length > 0) {
+          state.activeLayerId = remaining[remaining.length - 1]
+          state.selectedLayerIds.delete(state.activeLayerId)
+        }
+      }
+      renderLayersList()
+    } else if (e.shiftKey) {
+      // Shift+Click: add to multi-selection
+      e.stopPropagation()
+      if (folder.id !== state.activeLayerId) {
+        state.selectedLayerIds.add(folder.id)
+      }
+      renderLayersList()
+    } else {
+      setActiveLayer(folder.id)
+    }
+  })
+
+  // Drag and drop
+  _setupDragDrop(row, folder.id)
+
+  container.appendChild(row)
+
+  // Children container
+  const childContainer = document.createElement('div')
+  childContainer.className = 'layer-tree-children' + (folder.expanded ? '' : ' collapsed')
+
+  if (folder.expanded) {
+    _renderTreeItems(folder.children, childContainer, depth + 1)
+  }
+
+  container.appendChild(childContainer)
+}
+
+function _renderLayerItem(layer, container, depth) {
+  const row = document.createElement('div')
+  row.className = 'layer-item' + (layer.id === state.activeLayerId ? ' active' : '') + (state.selectedLayerIds.has(layer.id) ? ' multi-selected' : '')
+  row.draggable = true
+  row.dataset.id = layer.id
+  row.dataset.type = 'layer'
+  row.dataset.depth = depth
+
+  // Thumbnail
+  const thumb = document.createElement('canvas')
+  thumb.className = 'layer-thumb'
+  thumb.width = 32
+  thumb.height = 32
+  const thumbCtx = thumb.getContext('2d')
+  thumbCtx.imageSmoothingEnabled = false
+  thumbCtx.drawImage(layer.canvas, 0, 0, 32, 32)
+
+  // Name
+  const nameEl = document.createElement('div')
+  nameEl.className = 'layer-name'
+  nameEl.textContent = layer.name
+  nameEl.addEventListener('dblclick', (e) => {
+    e.stopPropagation()
+    _startRename(layer, nameEl)
+  })
+
+  // Visibility toggle
+  const visBtn = _createVisibilityButton(layer)
+
+  row.appendChild(thumb)
+  row.appendChild(nameEl)
+  row.appendChild(visBtn)
+
+  row.addEventListener('click', (e) => {
+    if (e.altKey) {
+      // Alt+Click: remove from multi-selection
+      e.stopPropagation()
+      state.selectedLayerIds.delete(layer.id)
+      if (state.activeLayerId === layer.id) {
+        const remaining = [...state.selectedLayerIds]
+        if (remaining.length > 0) {
+          state.activeLayerId = remaining[remaining.length - 1]
+          state.selectedLayerIds.delete(state.activeLayerId)
+        } else {
+          // Fall back to first available layer
+          const allLayers = getAllLayers(state.layers)
+          const other = allLayers.find(l => l.id !== layer.id)
+          if (other) state.activeLayerId = other.id
+        }
+      }
+      renderLayersList()
+    } else if (e.shiftKey) {
+      // Shift+Click: add to multi-selection
+      e.stopPropagation()
+      if (layer.id !== state.activeLayerId) {
+        state.selectedLayerIds.add(layer.id)
+      }
+      renderLayersList()
+    } else {
+      setActiveLayer(layer.id)
+    }
+  })
+
+  // Drag and drop
+  _setupDragDrop(row, layer.id)
+
+  container.appendChild(row)
+}
+
+function _createVisibilityButton(item) {
+  const visBtn = document.createElement('button')
+  visBtn.className = 'layer-visibility' + (item.visible ? '' : ' hidden')
+  visBtn.innerHTML = item.visible
+    ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
+    : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+  visBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    item.visible = !item.visible
+    renderLayersList()
+    compositeAndDisplay()
+  })
+  return visBtn
+}
+
+function _setupDragDrop(row, itemId) {
+  row.addEventListener('dragstart', (e) => {
+    _draggedItemId = itemId
+    e.dataTransfer.setData('text/plain', itemId)
+    e.dataTransfer.effectAllowed = 'move'
+    row.classList.add('dragging')
+    // slight delay to allow dragstart visual to pass
+    setTimeout(() => row.classList.add('dragging'), 0)
+  })
+
+  row.addEventListener('dragend', () => {
+    _draggedItemId = null
+    row.classList.remove('dragging')
+    // Clear all indicators
+    document.querySelectorAll('.drag-over-top, .drag-over-bottom, .drag-over-inside').forEach(el => {
+      el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-inside')
+    })
+  })
+
+  row.addEventListener('dragover', (e) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+
+    // Don't allow drop on self
+    if (row.dataset.id === _draggedItemId) return
+
+    // Clear previous indicators on this row
+    row.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-inside')
+
+    const rect = row.getBoundingClientRect()
+    const y = e.clientY - rect.top
+    const height = rect.height
+
+    if (row.dataset.type === 'folder') {
+      // Folders: top third = before, middle third = inside, bottom third = after
+      if (y < height * 0.25) {
+        row.classList.add('drag-over-top')
+      } else if (y > height * 0.75) {
+        row.classList.add('drag-over-bottom')
+      } else {
+        row.classList.add('drag-over-inside')
+      }
+    } else {
+      // Layers: top half = before, bottom half = after
+      if (y < height * 0.5) {
+        row.classList.add('drag-over-top')
+      } else {
+        row.classList.add('drag-over-bottom')
+      }
+    }
+  })
+
+  row.addEventListener('dragleave', () => {
+    row.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-inside')
+  })
+
+  row.addEventListener('drop', (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    row.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-inside')
+
+    const fromId = e.dataTransfer.getData('text/plain')
+    const toId = row.dataset.id
+
+    if (!fromId || fromId === toId) return
+
+    // Prevent dropping a folder into its own descendant
+    const fromItem = findItemById(state.layers, fromId)
+    if (fromItem && fromItem.type === 'folder') {
+      if (findItemById(fromItem.children, toId)) return
+    }
+
+    const rect = row.getBoundingClientRect()
+    const y = e.clientY - rect.top
+    const height = rect.height
+
+    let position // 'before', 'after', or 'inside'
+    if (row.dataset.type === 'folder') {
+      if (y < height * 0.25) position = 'before'
+      else if (y > height * 0.75) position = 'after'
+      else position = 'inside'
+    } else {
+      position = y < height * 0.5 ? 'before' : 'after'
+    }
+
+    // Remove the dragged item from its current position
+    const movedItem = removeItemById(state.layers, fromId)
+    if (!movedItem) return
+
+    if (position === 'inside') {
+      // Drop inside a folder
+      const targetFolder = findItemById(state.layers, toId)
+      if (targetFolder && targetFolder.type === 'folder') {
+        targetFolder.children.unshift(movedItem)
+        targetFolder.expanded = true
+      }
+    } else {
+      // Drop before or after an item
+      const targetLoc = findParentAndIndex(state.layers, toId)
+      if (targetLoc) {
+        const insertIdx = position === 'before' ? targetLoc.index : targetLoc.index + 1
+        targetLoc.parent.splice(insertIdx, 0, movedItem)
+      }
+    }
+
+    renderLayersList()
+    compositeAndDisplay()
+  })
+}
+
+// F2 rename support
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'F2' && state && state.activeLayerId) {
+    // Find the active item's name element in the DOM
+    const activeRow = layersList.querySelector(`.layer-item[data-id="${state.activeLayerId}"]`)
+    if (activeRow) {
+      const nameEl = activeRow.querySelector('.layer-name')
+      const activeItem = getActiveItem()
+      if (nameEl && activeItem) {
+        e.preventDefault()
+        _startRename(activeItem, nameEl)
+      }
+    }
+  }
+})
 
 // ==========================================
 // FRAMES / ANIMATION
@@ -623,15 +1311,10 @@ function renderLayersList() {
 function addNewFrame(duplicateFrom = null) {
   let frameLayers
   if (duplicateFrom !== null) {
-    frameLayers = state.frames[duplicateFrom].map((l) => {
-      const newLayer = createLayer(l.name)
-      newLayer.ctx.drawImage(l.canvas, 0, 0)
-      newLayer.visible = l.visible
-      newLayer.opacity = l.opacity
-      return newLayer
-    })
+    frameLayers = deepCloneTree(state.frames[duplicateFrom], state.width, state.height)
   } else {
-    frameLayers = [createLayer('Capa 1')]
+    const newLayer = createLayer('Capa 1')
+    frameLayers = [newLayer]
   }
 
   state.frames.push(frameLayers)
@@ -659,8 +1342,10 @@ function switchToFrame(index) {
   state.currentFrameIndex = index
   state.layers = state.frames[index]
 
-  if (state.activeLayerIndex >= state.layers.length) {
-    state.activeLayerIndex = state.layers.length - 1
+  // Ensure activeLayerId exists in the new frame
+  const allItemsInFrame = getAllItems(state.layers)
+  if (!findItemById(state.layers, state.activeLayerId) && allItemsInFrame.length > 0) {
+    state.activeLayerId = allItemsInFrame[0].id
   }
 
   renderLayersList()
@@ -680,15 +1365,15 @@ function renderFramesList() {
     const fc = document.createElement('canvas')
     fc.width = state.width
     fc.height = state.height
-    const fctx = fc.getContext('2d', { alpha: false })
+    const fctx = fc.getContext('2d')
     fctx.imageSmoothingEnabled = false
 
     // Composite all layers for this frame
-    for (let li = frameLayers.length - 1; li >= 0; li--) {
-      const layer = frameLayers[li]
-      if (!layer.visible) continue
+    const flatFrameLayers = getFlatLayers(frameLayers)
+    for (let li = flatFrameLayers.length - 1; li >= 0; li--) {
+      const layer = flatFrameLayers[li]
       fctx.globalAlpha = layer.opacity
-      fctx.drawImage(layer.canvas, 0, 0)
+      fctx.drawImage(layer.canvas, -OVERFLOW_MARGIN, -OVERFLOW_MARGIN)
     }
     fctx.globalAlpha = 1
 
@@ -703,7 +1388,7 @@ function renderFramesList() {
     // Delete button
     const delBtn = document.createElement('button')
     delBtn.className = 'frame-delete'
-    delBtn.textContent = '×'
+    delBtn.textContent = '�'
     delBtn.addEventListener('click', (e) => {
       e.stopPropagation()
       deleteFrame(i)
@@ -713,17 +1398,11 @@ function renderFramesList() {
     // Duplicate button
     const dupBtn = document.createElement('button')
     dupBtn.className = 'frame-duplicate'
-    dupBtn.textContent = '⧉'
+    dupBtn.textContent = '?'
     dupBtn.addEventListener('click', (e) => {
       e.stopPropagation()
       // Insert duplicate after this frame
-      let frameCopy = frameLayers.map((l) => {
-        const newLayer = createLayer(l.name)
-        newLayer.ctx.drawImage(l.canvas, 0, 0)
-        newLayer.visible = l.visible
-        newLayer.opacity = l.opacity
-        return newLayer
-      })
+      let frameCopy = deepCloneTree(frameLayers, state.width, state.height)
       state.frames.splice(i + 1, 0, frameCopy)
       switchToFrame(i + 1)
       renderFramesList()
@@ -742,28 +1421,30 @@ function renderFramesList() {
 // ==========================================
 function compositeAndDisplay() {
   if (!state) return
-  ctx.clearRect(0, 0, state.width, state.height)
+  const tW = totalW()
+  const tH = totalH()
+  ctx.clearRect(0, 0, tW, tH)
 
   // Draw onion skin (previous frame) - BLUE
   if (state.onionSkin && state.currentFrameIndex > 0) {
     const prevFrame = state.frames[state.currentFrameIndex - 1]
+    const prevFlatLayers = getFlatLayers(prevFrame)
     ctx.globalAlpha = 0.3
     ctx.fillStyle = 'rgba(0, 100, 255, 0.2)'
-    ctx.fillRect(0, 0, state.width, state.height)
-    for (let i = prevFrame.length - 1; i >= 0; i--) {
-      if (!prevFrame[i].visible) continue
-      ctx.drawImage(prevFrame[i].canvas, 0, 0)
+    ctx.fillRect(0, 0, tW, tH)
+    for (let i = prevFlatLayers.length - 1; i >= 0; i--) {
+      ctx.drawImage(prevFlatLayers[i].canvas, 0, 0)
     }
     ctx.globalAlpha = 0.3
     ctx.fillStyle = 'rgba(0, 150, 255, 0.15)'
-    ctx.fillRect(0, 0, state.width, state.height)
+    ctx.fillRect(0, 0, tW, tH)
     ctx.globalAlpha = 1
   }
 
-  // Draw current frame layers bottom to top - RED tint in preview mode
-  for (let i = state.layers.length - 1; i >= 0; i--) {
-    const layer = state.layers[i]
-    if (!layer.visible) continue
+  // Draw current frame layers bottom to top
+  const flatLayers = getFlatLayers(state.layers)
+  for (let i = flatLayers.length - 1; i >= 0; i--) {
+    const layer = flatLayers[i]
     ctx.globalAlpha = layer.opacity
     ctx.drawImage(layer.canvas, 0, 0)
   }
@@ -779,13 +1460,13 @@ function updateFrameThumbnail() {
 
   const fc = thumbs[state.currentFrameIndex].querySelector('canvas')
   if (!fc) return
-  const fctx = fc.getContext('2d', { alpha: false })
+  const fctx = fc.getContext('2d')
   fctx.clearRect(0, 0, fc.width, fc.height)
   fctx.imageSmoothingEnabled = false
 
-  for (let i = state.layers.length - 1; i >= 0; i--) {
-    const layer = state.layers[i]
-    if (!layer.visible) continue
+  const flatLayersThumb = getFlatLayers(state.layers)
+  for (let i = flatLayersThumb.length - 1; i >= 0; i--) {
+    const layer = flatLayersThumb[i]
     fctx.globalAlpha = layer.opacity
     fctx.drawImage(layer.canvas, 0, 0)
   }
@@ -797,7 +1478,8 @@ function updateAnimPreview() {
     animPreviewCanvas.width = state.width
     animPreviewCanvas.height = state.height
     animPreviewCtx.clearRect(0, 0, state.width, state.height)
-    animPreviewCtx.drawImage(canvas, 0, 0)
+    // Draw only the project area from the main canvas
+    animPreviewCtx.drawImage(canvas, OVERFLOW_MARGIN, OVERFLOW_MARGIN, state.width, state.height, 0, 0, state.width, state.height)
   }
 }
 
@@ -806,25 +1488,63 @@ function updateAnimPreview() {
 // ==========================================
 function drawGrid() {
   if (!state) return
-  gridCtx.clearRect(0, 0, state.width, state.height)
+  const displayW = gridOverlay.width
+  const displayH = gridOverlay.height
+  const tW = totalW()
+  const tH = totalH()
+  gridCtx.clearRect(0, 0, displayW, displayH)
 
-  if (!state.showGrid) return
+  // Cell size based on total canvas (including overflow)
+  const cellW = displayW / tW
+  const cellH = displayH / tH
 
-  gridCtx.strokeStyle = '#333333'
-  gridCtx.lineWidth = 0.5
+  // Draw dim overflow area
+  const projLeft = Math.round(OVERFLOW_MARGIN * cellW)
+  const projTop = Math.round(OVERFLOW_MARGIN * cellH)
+  const projW = Math.round(state.width * cellW)
+  const projH = Math.round(state.height * cellH)
 
-  for (let x = 0; x <= state.width; x++) {
-    gridCtx.beginPath()
-    gridCtx.moveTo(x, 0)
-    gridCtx.lineTo(x, state.height)
-    gridCtx.stroke()
+  gridCtx.fillStyle = 'rgba(0, 0, 0, 0.25)'
+  // Top
+  gridCtx.fillRect(0, 0, displayW, projTop)
+  // Bottom
+  gridCtx.fillRect(0, projTop + projH, displayW, displayH - projTop - projH)
+  // Left
+  gridCtx.fillRect(0, projTop, projLeft, projH)
+  // Right
+  gridCtx.fillRect(projLeft + projW, projTop, displayW - projLeft - projW, projH)
+
+  // Project boundary border
+  gridCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)'
+  gridCtx.lineWidth = 2
+  gridCtx.strokeRect(projLeft, projTop, projW, projH)
+
+  if (state.showGrid) {
+    // Only show grid when pixels are large enough to distinguish
+    if (cellW >= 4 && cellH >= 4) {
+      gridCtx.strokeStyle = 'rgba(0, 0, 0, 0.15)'
+      gridCtx.lineWidth = 1
+
+      // Grid lines for the FULL canvas (project + overflow)
+      for (let x = 0; x <= tW; x++) {
+        const px = Math.round(x * cellW) + 0.5
+        gridCtx.beginPath()
+        gridCtx.moveTo(px, 0)
+        gridCtx.lineTo(px, displayH)
+        gridCtx.stroke()
+      }
+      for (let y = 0; y <= tH; y++) {
+        const py = Math.round(y * cellH) + 0.5
+        gridCtx.beginPath()
+        gridCtx.moveTo(0, py)
+        gridCtx.lineTo(displayW, py)
+        gridCtx.stroke()
+      }
+    }
   }
-  for (let y = 0; y <= state.height; y++) {
-    gridCtx.beginPath()
-    gridCtx.moveTo(0, y)
-    gridCtx.lineTo(state.width, y)
-    gridCtx.stroke()
-  }
+
+  // Always render mirror guides on top of grid
+  renderMirrorGuides()
 }
 
 // ==========================================
@@ -832,25 +1552,74 @@ function drawGrid() {
 // ==========================================
 function getPixelCoords(e) {
   const rect = canvas.getBoundingClientRect()
-  
-  // Use clientX/Y but ensure we are relative to the canvas drawing area
-  const x = Math.floor((e.clientX - rect.left) * (state.width / rect.width))
-  const y = Math.floor((e.clientY - rect.top) * (state.height / rect.height))
+  const tW = totalW()
+  const tH = totalH()
+  const x = Math.floor((e.clientX - rect.left) * (tW / rect.width))
+  const y = Math.floor((e.clientY - rect.top) * (tH / rect.height))
 
-  return { 
-    x: Math.max(0, Math.min(x, state.width - 1)), 
-    y: Math.max(0, Math.min(y, state.height - 1)) 
+  return { x, y }  // Internal coords � project origin at (OVERFLOW_MARGIN, OVERFLOW_MARGIN)
+}
+
+// Mirror helpers � mirror within the project area (internal coords)
+function mirrorX(x) { return 2 * OVERFLOW_MARGIN + state.width - 1 - x }
+function mirrorY(y) { return 2 * OVERFLOW_MARGIN + state.height - 1 - y }
+
+// Execute a drawing operation and its mirrored versions
+// fn(x, y, ...extra) will be called for each mirror variant
+function withMirror(x, y, fn) {
+  fn(x, y)
+  if (drawingState.mirrorH) fn(mirrorX(x), y)
+  if (drawingState.mirrorV) fn(x, mirrorY(y))
+  if (drawingState.mirrorH && drawingState.mirrorV) fn(mirrorX(x), mirrorY(y))
+}
+
+// Execute a line drawing operation with mirroring
+function withMirrorLine(x0, y0, x1, y1, fn) {
+  fn(x0, y0, x1, y1)
+  if (drawingState.mirrorH) fn(mirrorX(x0), y0, mirrorX(x1), y1)
+  if (drawingState.mirrorV) fn(x0, mirrorY(y0), x1, mirrorY(y1))
+  if (drawingState.mirrorH && drawingState.mirrorV) fn(mirrorX(x0), mirrorY(y0), mirrorX(x1), mirrorY(y1))
+}
+
+// Render mirror guide lines on the grid overlay
+function renderMirrorGuides() {
+  if (!drawingState.mirrorH && !drawingState.mirrorV) return
+  const dw = gridOverlay.width
+  const dh = gridOverlay.height
+  if (dw === 0 || dh === 0) return
+  const tW = totalW()
+  const tH = totalH()
+  
+  const cellW = dw / tW
+  const cellH = dh / tH
+  
+  gridCtx.save()
+  gridCtx.setLineDash([6, 4])
+  gridCtx.lineWidth = 2
+  gridCtx.strokeStyle = '#ff00ffaa'
+  
+  if (drawingState.mirrorH) {
+    const cx = Math.round((OVERFLOW_MARGIN + state.width / 2) * cellW)
+    gridCtx.beginPath()
+    gridCtx.moveTo(cx, 0)
+    gridCtx.lineTo(cx, dh)
+    gridCtx.stroke()
   }
+  if (drawingState.mirrorV) {
+    const cy = Math.round((OVERFLOW_MARGIN + state.height / 2) * cellH)
+    gridCtx.beginPath()
+    gridCtx.moveTo(0, cy)
+    gridCtx.lineTo(dw, cy)
+    gridCtx.stroke()
+  }
+  gridCtx.restore()
 }
 
 function drawPixel(x, y, layerCtx, color = null) {
   const colorToUse = color || state.currentColor
-  if (colorToUse === 'transparent') {
-    layerCtx.clearRect(x, y, 1, 1)
-  } else {
-    layerCtx.fillStyle = colorToUse
-    layerCtx.fillRect(x, y, 1, 1)
-  }
+  if (colorToUse === 'transparent') return  // Only eraser tool should erase
+  layerCtx.fillStyle = colorToUse
+  layerCtx.fillRect(x, y, 1, 1)
 }
 
 function erasePixel(x, y, layerCtx) {
@@ -859,15 +1628,11 @@ function erasePixel(x, y, layerCtx) {
 
 function drawBrush(x, y, size, layerCtx, color = null) {
   const colorToUse = color || state.currentColor
+  if (colorToUse === 'transparent') return  // Only eraser tool should erase
   const halfSize = size / 2
   const offset = size % 2 === 0 ? halfSize : halfSize - 0.5
-
-  if (colorToUse === 'transparent') {
-    layerCtx.clearRect(x - offset, y - offset, size, size)
-  } else {
-    layerCtx.fillStyle = colorToUse
-    layerCtx.fillRect(x - offset, y - offset, size, size)
-  }
+  layerCtx.fillStyle = colorToUse
+  layerCtx.fillRect(x - offset, y - offset, size, size)
 }
 
 function eraseBrush(x, y, size, layerCtx) {
@@ -886,10 +1651,12 @@ function getPixelColor(x, y, layerCtx) {
 }
 
 function floodFill(x, y, layerCtx, selectedPixels = null, color = null) {
-  const imageData = layerCtx.getImageData(0, 0, state.width, state.height)
+  const tW = totalW()
+  const tH = totalH()
+  const imageData = layerCtx.getImageData(0, 0, tW, tH)
   const data = imageData.data
 
-  const targetIdx = (y * state.width + x) * 4
+  const targetIdx = (y * tW + x) * 4
   const targetR = data[targetIdx]
   const targetG = data[targetIdx + 1]
   const targetB = data[targetIdx + 2]
@@ -920,7 +1687,7 @@ function floodFill(x, y, layerCtx, selectedPixels = null, color = null) {
 
   while (stack.length > 0) {
     const [cx, cy] = stack.pop()
-    const key = cy * state.width + cx
+    const key = cy * tW + cx
     if (visited.has(key)) continue
     visited.add(key)
 
@@ -936,9 +1703,9 @@ function floodFill(x, y, layerCtx, selectedPixels = null, color = null) {
     data[idx + 3] = fillA
 
     if (cx > 0) stack.push([cx - 1, cy])
-    if (cx < state.width - 1) stack.push([cx + 1, cy])
+    if (cx < tW - 1) stack.push([cx + 1, cy])
     if (cy > 0) stack.push([cx, cy - 1])
-    if (cy < state.height - 1) stack.push([cx, cy + 1])
+    if (cy < tH - 1) stack.push([cx, cy + 1])
   }
 
   layerCtx.putImageData(imageData, 0, 0)
@@ -1016,12 +1783,40 @@ function drawRectOutline(x0, y0, x1, y1, layerCtx, color = null) {
 // SELECTION & MAGIC WAND TOOLS
 // ==========================================
 
+function updateSelectionRectFromPixels() {
+  if (drawingState.selectedPixels.size === 0) {
+    drawingState.selectRect = null
+    $('#btnCopySelection').style.display = 'none'
+    return
+  }
+
+  let minX = Infinity, maxX = -Infinity
+  let minY = Infinity, maxY = -Infinity
+  drawingState.selectedPixels.forEach((key) => {
+    const [px, py] = key.split(',').map(Number)
+    minX = Math.min(minX, px)
+    maxX = Math.max(maxX, px)
+    minY = Math.min(minY, py)
+    maxY = Math.max(maxY, py)
+  })
+
+  drawingState.selectRect = {
+    x: minX,
+    y: minY,
+    w: maxX - minX + 1,
+    h: maxY - minY + 1,
+  }
+  $('#btnCopySelection').style.display = 'block'
+}
+
 function selectByColor(x, y, layerCtx) {
   const pixelData = layerCtx.getImageData(x, y, 1, 1).data
   const targetColor = { r: pixelData[0], g: pixelData[1], b: pixelData[2], a: pixelData[3] }
   const tolerance = (drawingState.wandTolerance / 100) * 255
 
-  const imageData = layerCtx.getImageData(0, 0, state.width, state.height)
+  const tW = totalW()
+  const tH = totalH()
+  const imageData = layerCtx.getImageData(0, 0, tW, tH)
   const data = imageData.data
 
   // Collect matching pixels (without modifying selection yet)
@@ -1041,8 +1836,8 @@ function selectByColor(x, y, layerCtx) {
 
     if (a > 0 && distance <= tolerance) {
       const pixelIndex = i / 4
-      const px = pixelIndex % state.width
-      const py = Math.floor(pixelIndex / state.width)
+      const px = pixelIndex % tW
+      const py = Math.floor(pixelIndex / tW)
       newPixels.add(px + ',' + py)
     }
   }
@@ -1068,6 +1863,7 @@ function selectByColor(x, y, layerCtx) {
       break
   }
 
+  updateSelectionRectFromPixels()
   startMarchingAntsAnimation()
 }
 
@@ -1077,13 +1873,13 @@ function selectByColor(x, y, layerCtx) {
 function copySelectionToClipboard() {
   if (drawingState.selectedPixels.size === 0 || !drawingState.selectRect) return false
 
-  const layer = state.layers[state.activeLayerIndex]
+  const layer = getActiveLayer()
   const rect = drawingState.selectRect
 
   drawingState.clipboardCanvas = document.createElement('canvas')
   drawingState.clipboardCanvas.width = rect.w
   drawingState.clipboardCanvas.height = rect.h
-  const clipCtx = drawingState.clipboardCanvas.getContext('2d', { alpha: false })
+  const clipCtx = drawingState.clipboardCanvas.getContext('2d')
   clipCtx.drawImage(layer.canvas, -rect.x, -rect.y)
 
   drawingState.pasteStartX = rect.x
@@ -1099,7 +1895,7 @@ function startMarchingAntsAnimation() {
   drawingState.marchingAntsOffset = 0
   drawingState.marchingAntsInterval = setInterval(() => {
     drawingState.marchingAntsOffset = (drawingState.marchingAntsOffset + 1) % 8
-    previewCtx.clearRect(0, 0, state.width, state.height)
+    previewCtx.clearRect(0, 0, totalW(), totalH())
 
     if (drawingState.selectRect) {
       drawMarchingAntsRect(
@@ -1116,19 +1912,11 @@ function startMarchingAntsAnimation() {
 }
 
 function drawMarchingAntsRect(x, y, w, h, ctx) {
-  // Outer bright white - much thicker and more visible
-  ctx.strokeStyle = '#FFFFFF'
-  ctx.lineWidth = 1.5
-  ctx.setLineDash([1, 1])
-  ctx.lineDashOffset = -drawingState.marchingAntsOffset * 0.1
-  ctx.strokeRect(x - 0.2, y - 0.2, w + 0.4, h + 0.4)
-
-  // Inner bright yellow - thick and completely visible
   ctx.strokeStyle = '#FFFF00'
   ctx.lineWidth = 1
-  ctx.lineDashOffset = -(drawingState.marchingAntsOffset * 0.1 + 0.5)
+  ctx.setLineDash([1, 1])
+  ctx.lineDashOffset = -drawingState.marchingAntsOffset * 0.1
   ctx.strokeRect(x, y, w, h)
-
   ctx.setLineDash([])
 }
 
@@ -1185,7 +1973,7 @@ function hideTextDialog() {
 function renderTextToBitmap(text, font, size) {
   // Create a temporary canvas for text measurement
   const tempCanvas = document.createElement('canvas')
-  const tempCtx = tempCanvas.getContext('2d', { alpha: false })
+  const tempCtx = tempCanvas.getContext('2d')
 
   const fontSize = parseInt(size)
   const fontFamily = font || 'monospace'
@@ -1198,7 +1986,7 @@ function renderTextToBitmap(text, font, size) {
   const textCanvas = document.createElement('canvas')
   textCanvas.width = width
   textCanvas.height = height
-  const ctx = textCanvas.getContext('2d', { alpha: false })
+  const ctx = textCanvas.getContext('2d')
   ctx.font = `${fontSize}px ${fontFamily}`
   ctx.fillStyle = state.currentColor
   ctx.fillText(text, 2, fontSize + 1)
@@ -1210,23 +1998,11 @@ function renderTextToBitmap(text, font, size) {
 // UNDO / REDO
 // ==========================================
 function saveUndoState() {
-  const snapshot = state.layers.map((l) => {
-    const copyCanvas = document.createElement('canvas')
-    copyCanvas.width = state.width
-    copyCanvas.height = state.height
-    const copyCtx = copyCanvas.getContext('2d', { alpha: false })
-    copyCtx.drawImage(l.canvas, 0, 0)
-    return {
-      name: l.name,
-      canvas: copyCanvas,
-      visible: l.visible,
-      opacity: l.opacity,
-    }
-  })
+  const snapshot = snapshotTree(state.layers)
 
   state.undoStack.push({
     layers: snapshot,
-    activeLayerIndex: state.activeLayerIndex,
+    activeLayerId: state.activeLayerId,
   })
 
   if (state.undoStack.length > state.maxUndoSteps) {
@@ -1240,16 +2016,10 @@ function undo() {
   if (state.undoStack.length === 0) return
 
   // Save current state to redo
-  const currentSnapshot = state.layers.map((l) => {
-    const copyCanvas = document.createElement('canvas')
-    copyCanvas.width = state.width
-    copyCanvas.height = state.height
-    copyCanvas.getContext('2d', { alpha: false }).drawImage(l.canvas, 0, 0)
-    return { name: l.name, canvas: copyCanvas, visible: l.visible, opacity: l.opacity }
-  })
+  const currentSnapshot = snapshotTree(state.layers)
   state.redoStack.push({
     layers: currentSnapshot,
-    activeLayerIndex: state.activeLayerIndex,
+    activeLayerId: state.activeLayerId,
   })
 
   const prev = state.undoStack.pop()
@@ -1259,16 +2029,10 @@ function undo() {
 function redo() {
   if (state.redoStack.length === 0) return
 
-  const currentSnapshot = state.layers.map((l) => {
-    const copyCanvas = document.createElement('canvas')
-    copyCanvas.width = state.width
-    copyCanvas.height = state.height
-    copyCanvas.getContext('2d', { alpha: false }).drawImage(l.canvas, 0, 0)
-    return { name: l.name, canvas: copyCanvas, visible: l.visible, opacity: l.opacity }
-  })
+  const currentSnapshot = snapshotTree(state.layers)
   state.undoStack.push({
     layers: currentSnapshot,
-    activeLayerIndex: state.activeLayerIndex,
+    activeLayerId: state.activeLayerId,
   })
 
   const next = state.redoStack.pop()
@@ -1276,15 +2040,8 @@ function redo() {
 }
 
 function restoreFromSnapshot(snapshot) {
-  state.layers = snapshot.layers.map((s) => {
-    const layer = createLayer(s.name)
-    layer.ctx.drawImage(s.canvas, 0, 0)
-    layer.visible = s.visible
-    layer.opacity = s.opacity
-    return layer
-  })
-
-  state.activeLayerIndex = snapshot.activeLayerIndex
+  state.layers = restoreTree(snapshot.layers)
+  state.activeLayerId = snapshot.activeLayerId
   state.frames[state.currentFrameIndex] = state.layers
 
   renderLayersList()
@@ -1316,7 +2073,7 @@ function setupEventListeners() {
       drawingState.selectedPixels.clear()
       drawingState.selectRect = null
       stopMarchingAntsAnimation()
-      previewCtx.clearRect(0, 0, state.width, state.height)
+      previewCtx.clearRect(0, 0, totalW(), totalH())
       $('#btnCopySelection').style.display = 'none'
       $('#btnPasteSelection').style.display = 'none'
     }
@@ -1333,8 +2090,8 @@ function setupEventListeners() {
   // === Menu Bar ===
   $('#menuNew').addEventListener('click', () => createNewProject())
   $('#menuOpen').addEventListener('click', openProjectFile)
-  $('#menuSave').addEventListener('click', () => exportPNG())
-  $('#menuSaveAs').addEventListener('click', showSaveAsMenu)
+  $('#menuSave').addEventListener('click', () => exportAnima())
+  $('#menuSaveAs').addEventListener('click', () => exportAnima())
   $('#menuExportSheet').addEventListener('click', exportSpritesheet)
   $('#menuCloseTab').addEventListener('click', () => closeProject(appState.currentProjectIndex))
   $('#menuCloseAllTabs').addEventListener('click', closeAllProjects)
@@ -1368,11 +2125,7 @@ function setupEventListeners() {
   // === Canvas mouse events ===
   $$('.tool-btn[data-tool]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      if (state) {
-        state.currentTool = btn.dataset.tool
-        $$('.tool-btn[data-tool]').forEach((b) => b.classList.remove('active'))
-        btn.classList.add('active')
-      }
+      if (state) selectTool(btn.dataset.tool)
     })
   })
 
@@ -1381,6 +2134,18 @@ function setupEventListeners() {
     if (!state) return
     state.showGrid = !state.showGrid
     $('#toggleGrid').classList.toggle('active', state.showGrid)
+    drawGrid()
+  })
+
+  // === Mirror toggles ===
+  $('#toggleMirrorH').addEventListener('click', () => {
+    drawingState.mirrorH = !drawingState.mirrorH
+    $('#toggleMirrorH').classList.toggle('active', drawingState.mirrorH)
+    drawGrid()
+  })
+  $('#toggleMirrorV').addEventListener('click', () => {
+    drawingState.mirrorV = !drawingState.mirrorV
+    $('#toggleMirrorV').classList.toggle('active', drawingState.mirrorV)
     drawGrid()
   })
 
@@ -1406,7 +2171,6 @@ function setupEventListeners() {
   colorPreviewSwatch.addEventListener('click', () => colorPickerInput.click())
   colorPickerInput.addEventListener('input', (e) => {
     setCurrentColor(e.target.value)
-    addToUserPalette(e.target.value)
   })
 
   // === Secondary Color Picker ===
@@ -1436,13 +2200,17 @@ function setupEventListeners() {
 
   // === Layers ===
   $('#btnAddLayer').addEventListener('click', addLayer)
+  $('#btnAddFolder').addEventListener('click', addFolder)
   $('#btnDeleteLayer').addEventListener('click', deleteLayer)
   $('#btnMergeDown').addEventListener('click', mergeDown)
 
   layerOpacitySlider.addEventListener('input', (e) => {
     if (!state) return
     const val = parseInt(e.target.value)
-    state.layers[state.activeLayerIndex].opacity = val / 100
+    const activeItem = getActiveItem()
+    if (activeItem) {
+      activeItem.opacity = val / 100
+    }
     opacityValueLabel.textContent = val + '%'
     compositeAndDisplay()
   })
@@ -1469,7 +2237,7 @@ function setupEventListeners() {
 
   // === Clear user palette ===
   $('#btnClearUserPalette').addEventListener('click', () => {
-    state.userPalette = []
+    drawingState.userPalette = []
     renderUserPalette()
   })
 
@@ -1520,12 +2288,12 @@ function setupEventListeners() {
   // === Selection tools ===
   $('#btnCopySelection').addEventListener('click', () => {
     if (drawingState.selectedPixels.size === 0 || !drawingState.selectRect) return
-    const layer = state.layers[state.activeLayerIndex]
+    const layer = getActiveLayer()
     const rect = drawingState.selectRect
     drawingState.clipboardCanvas = document.createElement('canvas')
     drawingState.clipboardCanvas.width = rect.w
     drawingState.clipboardCanvas.height = rect.h
-    const clipCtx = drawingState.clipboardCanvas.getContext('2d', { alpha: false })
+    const clipCtx = drawingState.clipboardCanvas.getContext('2d')
     clipCtx.drawImage(layer.canvas, -rect.x, -rect.y)
     drawingState.pasteMode = true
     drawingState.pasteStartX = rect.x
@@ -1552,7 +2320,7 @@ function setupEventListeners() {
     }
 
     saveUndoState()
-    const layer = state.layers[state.activeLayerIndex]
+    const layer = getActiveLayer()
     const textCanvas = renderTextToBitmap(text, font, size)
     layer.ctx.drawImage(textCanvas, drawingState.textStart.x, drawingState.textStart.y)
     compositeAndDisplay()
@@ -1579,7 +2347,33 @@ function setupEventListeners() {
   const rigModeSelect = $('#rigModeSelect')
   if (rigModeSelect) {
     rigModeSelect.addEventListener('change', (e) => {
+      // When leaving animate mode, commit the current deformation
+      // by clearing base snapshots so deformed state becomes ground truth
+      if (state.rig.rigMode === 'animate' && e.target.value !== 'animate') {
+        state.rig.basePixels = null
+        state.rig.baseBones = null
+        state.rig.baseBoneWeights = null
+      }
       state.rig.rigMode = e.target.value
+      renderRigVisualization()
+    })
+  }
+
+  const btnAutoWeights = $('#btnAutoWeights')
+  if (btnAutoWeights) {
+    btnAutoWeights.addEventListener('click', () => {
+      autoAssignBoneWeights()
+      updateRigPanel()
+      renderRigVisualization()
+    })
+  }
+
+  const btnClearWeights = $('#btnClearWeights')
+  if (btnClearWeights) {
+    btnClearWeights.addEventListener('click', () => {
+      state.rig.boneWeights = {}
+      updateRigPanel()
+      renderRigVisualization()
     })
   }
 
@@ -1587,11 +2381,20 @@ function setupEventListeners() {
   if (btnDeleteBone) {
     btnDeleteBone.addEventListener('click', () => {
       if (state.rig.selectedBoneId !== null) {
-        state.rig.bones.splice(state.rig.selectedBoneId, 1)
-        // Reassign IDs after deletion
-        state.rig.bones.forEach((bone, idx) => {
-          bone.id = idx
-        })
+        const idx = state.rig.bones.findIndex(b => b.id === state.rig.selectedBoneId)
+        if (idx !== -1) {
+          state.rig.bones.splice(idx, 1)
+          // Reassign IDs after deletion
+          state.rig.bones.forEach((bone, i) => {
+            bone.id = i
+          })
+          // Update boneColors map
+          const newColors = {}
+          state.rig.bones.forEach((bone) => {
+            newColors[bone.id] = state.rig.boneColors[bone.id] || getRandomBoneColor()
+          })
+          state.rig.boneColors = newColors
+        }
         state.rig.selectedBoneId = null
         updateRigPanel()
         renderRigVisualization()
@@ -1647,7 +2450,7 @@ function setupEventListeners() {
         drawingState.pasteMode = false
         stopMarchingAntsAnimation()
         drawingState.selectRect = null
-        previewCtx.clearRect(0, 0, state.width, state.height)
+        previewCtx.clearRect(0, 0, totalW(), totalH())
         $('#btnCopySelection').style.display = 'none'
         $('#btnPasteSelection').style.display = 'none'
       }
@@ -1659,7 +2462,7 @@ function setupEventListeners() {
       if (copySelectionToClipboard()) {
         saveUndoState()
         const rect = drawingState.selectRect
-        state.layers[state.activeLayerIndex].ctx.clearRect(rect.x, rect.y, rect.w, rect.h)
+        getActiveLayer().ctx.clearRect(rect.x, rect.y, rect.w, rect.h)
         compositeAndDisplay()
       }
     } else if (e.ctrlKey && e.key === 'v') {
@@ -1669,13 +2472,13 @@ function setupEventListeners() {
         drawingState.pasteMode = true
         // Initialize paste position - show at current paste start position or center of canvas
         if (!drawingState.pasteStartX) {
-          drawingState.pasteStartX = Math.max(0, Math.floor((state.width - drawingState.clipboardCanvas.width) / 2))
+          drawingState.pasteStartX = Math.max(0, OVERFLOW_MARGIN + Math.floor((state.width - drawingState.clipboardCanvas.width) / 2))
         }
         if (!drawingState.pasteStartY) {
-          drawingState.pasteStartY = Math.max(0, Math.floor((state.height - drawingState.clipboardCanvas.height) / 2))
+          drawingState.pasteStartY = Math.max(0, OVERFLOW_MARGIN + Math.floor((state.height - drawingState.clipboardCanvas.height) / 2))
         }
         // Draw the pasted content to the preview
-        previewCtx.clearRect(0, 0, state.width, state.height)
+        previewCtx.clearRect(0, 0, totalW(), totalH())
         previewCtx.drawImage(drawingState.clipboardCanvas, drawingState.pasteStartX, drawingState.pasteStartY)
       }
     }
@@ -1696,11 +2499,24 @@ function selectTool(tool) {
 
   const rigEditorPanel = $('#rigEditorPanel')
   if (rigEditorPanel) {
-    rigEditorPanel.style.display = tool === 'rig' ? 'block' : 'none'
     if (tool === 'rig') {
       updateRigPanel()
       renderRigVisualization()
+    } else {
+      // Clear rig overlay and base snapshots when switching away
+      rigCtx.clearRect(0, 0, rigOverlay.width, rigOverlay.height)
+      state.rig.basePixels = null
+      state.rig.baseBones = null
+      state.rig.baseBoneWeights = null
     }
+  }
+
+  if (tool === 'hand') {
+    canvasContainer.style.cursor = 'grab'
+    canvasWrapper.style.cursor = 'grab'
+  } else {
+    canvasContainer.style.cursor = ''
+    canvasWrapper.style.cursor = ''
   }
 
   const brushSizeSection = $('#brushSizeSection')
@@ -1724,7 +2540,7 @@ function onCanvasMouseDown(e) {
   if (state.isPlaying) return
 
   const { x, y } = getPixelCoords(e)
-  const layer = state.layers[state.activeLayerIndex]
+  const layer = getActiveLayer()
   // NOTE: Layer visibility check moved into switch statement for tool-specific handling
 
   drawingState.isDrawing = true
@@ -1733,28 +2549,73 @@ function onCanvasMouseDown(e) {
     case 'pencil':
       // Pencil requires visible layer
       if (!layer || !layer.visible) return
+
+      // If clicking inside existing selection, start drag just like select tool
+      if (drawingState.selectRect && drawingState.selectedPixels.size > 0) {
+        const sx = drawingState.selectRect.x
+        const sy = drawingState.selectRect.y
+        const sw = drawingState.selectRect.w
+        const sh = drawingState.selectRect.h
+
+        if (x >= sx && x < sx + sw && y >= sy && y < sy + sh) {
+          drawingState.dragSelection = true
+          drawingState.dragStartX = x
+          drawingState.dragStartY = y
+          drawingState.dragStartRectX = drawingState.selectRect.x
+          drawingState.dragStartRectY = drawingState.selectRect.y
+
+          // Extract selected pixels into draggedPixelsCanvas
+          const dragRect = { x: sx, y: sy, w: sw, h: sh }
+          drawingState.draggedPixelsCanvas = document.createElement('canvas')
+          drawingState.draggedPixelsCanvas.width = dragRect.w
+          drawingState.draggedPixelsCanvas.height = dragRect.h
+          const dragCtx = drawingState.draggedPixelsCanvas.getContext('2d')
+          const layerImageData = layer.ctx.getImageData(dragRect.x, dragRect.y, dragRect.w, dragRect.h)
+          const data = layerImageData.data
+
+          // Remove non-selected pixels within drag area
+          for (let i = 0; i < data.length; i += 4) {
+            const pixelIndex = i / 4
+            const px = dragRect.x + (pixelIndex % dragRect.w)
+            const py = dragRect.y + Math.floor(pixelIndex / dragRect.w)
+            const pixelKey = px + ',' + py
+            if (!drawingState.selectedPixels.has(pixelKey)) {
+              data[i + 3] = 0
+            }
+          }
+          dragCtx.putImageData(layerImageData, 0, 0)
+          drawingState.isDrawing = true
+          return
+        }
+      }
       saveUndoState()
       // Determine color: left-click = primary (currentColor), right-click = secondary
       drawingState.paintColor = e.button === 0 ? state.currentColor : state.secondaryColor
-      if (drawingState.brushSize === 1) {
-        drawPixel(x, y, layer.ctx, drawingState.paintColor)
-      } else {
-        drawBrush(x, y, drawingState.brushSize, layer.ctx, drawingState.paintColor)
-      }
+      addToUserPalette(drawingState.paintColor)
+      withMirror(x, y, (mx, my) => {
+        if (drawingState.brushSize === 1) {
+          drawPixel(mx, my, layer.ctx, drawingState.paintColor)
+        } else {
+          drawBrush(mx, my, drawingState.brushSize, layer.ctx, drawingState.paintColor)
+        }
+      })
       drawingState.lastPixelX = x
       drawingState.lastPixelY = y
       compositeAndDisplay()
+      // isDrawing stays true so mousemove continues drawing
       break
 
     case 'eraser':
       // Eraser requires visible layer
       if (!layer || !layer.visible) return
       saveUndoState()
-      if (drawingState.brushSize === 1) {
-        erasePixel(x, y, layer.ctx)
-      } else {
-        eraseBrush(x, y, drawingState.brushSize, layer.ctx)
-      }
+      withMirror(x, y, (mx, my) => {
+        if (drawingState.brushSize === 1) {
+          erasePixel(mx, my, layer.ctx)
+        } else {
+          eraseBrush(mx, my, drawingState.brushSize, layer.ctx)
+        }
+      })
       drawingState.lastPixelX = x
       drawingState.lastPixelY = y
       compositeAndDisplay()
@@ -1766,9 +2627,12 @@ function onCanvasMouseDown(e) {
       saveUndoState()
       // Determine color: left-click = primary (currentColor), right-click = secondary
       const fillColor = e.button === 0 ? state.currentColor : state.secondaryColor
+      addToUserPalette(fillColor)
       // Pass selectedPixels if there's an active selection
       const fillSelection = drawingState.selectedPixels.size > 0 ? drawingState.selectedPixels : null
-      floodFill(x, y, layer.ctx, fillSelection, fillColor)
+      withMirror(x, y, (mx, my) => {
+        floodFill(mx, my, layer.ctx, fillSelection, fillColor)
+      })
       compositeAndDisplay()
       drawingState.isDrawing = false
       break
@@ -1778,34 +2642,24 @@ function onCanvasMouseDown(e) {
       if (!layer) return
       // Pick color from composite
       const compositeData = ctx.getImageData(x, y, 1, 1).data
+      const toHex = (v) => v.toString(16).padStart(2, '0')
       const pickedColor = compositeData[3] === 0
         ? 'transparent'
-        : '#' + ((1 << 24) + (compositeData[0] << 16) + (compositeData[1] << 8) + compositeData[2]).toString(16).slice(1)
+        : `#${toHex(compositeData[0])}${toHex(compositeData[1])}${toHex(compositeData[2])}`
 
-      // Determine if setting primary or secondary based on button
-      if (e.button === 0) {
-        // Left-click: set primary color
-        setCurrentColor(pickedColor)
-        if (pickedColor !== 'transparent') addToUserPalette(pickedColor)
-      } else {
-        // Right-click: set secondary color
+      if (e.button === 2) {
         state.secondaryColor = pickedColor
         const secondaryColorSwatch = $('#secondaryColorSwatch')
         const secondaryColorHexLabel = $('#secondaryColorHexLabel')
         const secondaryColorPickerInput = $('#secondaryColorPickerInput')
         if (secondaryColorSwatch && secondaryColorHexLabel && secondaryColorPickerInput) {
-          if (pickedColor === 'transparent') {
-            secondaryColorSwatch.classList.add('transparent-bg')
-            secondaryColorSwatch.style.backgroundColor = ''
-            secondaryColorHexLabel.textContent = 'Transparente'
-          } else {
-            secondaryColorSwatch.classList.remove('transparent-bg')
-            secondaryColorSwatch.style.backgroundColor = pickedColor
-            secondaryColorHexLabel.textContent = pickedColor.toUpperCase()
-            secondaryColorPickerInput.value = pickedColor
-            addToUserPalette(pickedColor)
-          }
+          secondaryColorSwatch.style.backgroundColor = pickedColor === 'transparent' ? '' : pickedColor
+          secondaryColorSwatch.classList.toggle('transparent-bg', pickedColor === 'transparent')
+          secondaryColorHexLabel.textContent = pickedColor === 'transparent' ? 'Transparente' : pickedColor.toUpperCase()
+          if (pickedColor !== 'transparent') secondaryColorPickerInput.value = pickedColor
         }
+      } else {
+        setCurrentColor(pickedColor)
       }
       drawingState.isDrawing = false
       break
@@ -1817,6 +2671,7 @@ function onCanvasMouseDown(e) {
       saveUndoState()
       // Determine color: left-click = primary (currentColor), right-click = secondary
       drawingState.paintColor = e.button === 0 ? state.currentColor : state.secondaryColor
+      addToUserPalette(drawingState.paintColor)
       drawingState.lineStart = { x, y }
       break
 
@@ -1826,21 +2681,32 @@ function onCanvasMouseDown(e) {
       saveUndoState()
       // Determine color: left-click = primary (currentColor), right-click = secondary
       drawingState.paintColor = e.button === 0 ? state.currentColor : state.secondaryColor
+      addToUserPalette(drawingState.paintColor)
       drawingState.rectStart = { x, y }
       break
 
-    case 'move':
-      // Move requires visible layer
+    case 'move': {
+      // Move requires at least the active layer to be visible
       if (!layer || !layer.visible) return
       saveUndoState()
       drawingState.moveStart = { x, y }
-      // Store copy of layer data
+      // Store copies of all selected layers for simultaneous movement
+      const selectedMoveLayers = getSelectedLayers().filter(l => l.visible)
+      drawingState.moveAllLayersData = selectedMoveLayers.map(l => {
+        const c = document.createElement('canvas')
+        c.width = totalW()
+        c.height = totalH()
+        c.getContext('2d').drawImage(l.canvas, 0, 0)
+        return { layer: l, canvas: c }
+      })
+      // Backward compat single-layer reference
       const moveCanvas = document.createElement('canvas')
-      moveCanvas.width = state.width
-      moveCanvas.height = state.height
-      moveCanvas.getContext('2d', { alpha: false }).drawImage(layer.canvas, 0, 0)
+      moveCanvas.width = totalW()
+      moveCanvas.height = totalH()
+      moveCanvas.getContext('2d').drawImage(layer.canvas, 0, 0)
       drawingState.moveLayerData = moveCanvas
       break
+    }
 
     case 'select':
       // Select requires visible layer
@@ -1867,39 +2733,40 @@ function onCanvasMouseDown(e) {
           drawingState.dragStartRectY = rect.y
           drawingState.isDrawing = true
 
-          // Save a copy of ONLY the selected pixels (not the whole rect)
           const dragRect = drawingState.selectRect
-          console.log('Drag rect:', dragRect)
-          console.log('Selected pixels count:', drawingState.selectedPixels.size)
 
-          drawingState.draggedPixelsCanvas = document.createElement('canvas')
-          drawingState.draggedPixelsCanvas.width = dragRect.w
-          drawingState.draggedPixelsCanvas.height = dragRect.h
-          const dragCtx = drawingState.draggedPixelsCanvas.getContext('2d', { alpha: false })
-          dragCtx.imageSmoothingEnabled = false
-
-          // Copy only selected pixels
-          const layerImageData = layer.ctx.getImageData(dragRect.x, dragRect.y, dragRect.w, dragRect.h)
-          const data = layerImageData.data
-          let opaquePixels = 0
-          for (let i = 0; i < data.length; i += 4) {
-            // Check if this pixel is in the selection
-            const pixelIndex = i / 4
-            const px = dragRect.x + (pixelIndex % dragRect.w)
-            const py = dragRect.y + Math.floor(pixelIndex / dragRect.w)
-            const pixelKey = px + ',' + py
-
-            // If pixel is NOT selected, make it transparent
-            if (!drawingState.selectedPixels.has(pixelKey)) {
-              data[i + 3] = 0  // Set alpha to 0
-            } else {
-              opaquePixels++
+          // Helper: extract selected pixels from a layer into a canvas
+          function extractSelectedPixels(srcCtx) {
+            const c = document.createElement('canvas')
+            c.width = dragRect.w
+            c.height = dragRect.h
+            const cCtx = c.getContext('2d')
+            cCtx.imageSmoothingEnabled = false
+            const imgData = srcCtx.getImageData(dragRect.x, dragRect.y, dragRect.w, dragRect.h)
+            const d = imgData.data
+            for (let i = 0; i < d.length; i += 4) {
+              const pi = i / 4
+              const px = dragRect.x + (pi % dragRect.w)
+              const py = dragRect.y + Math.floor(pi / dragRect.w)
+              if (!drawingState.selectedPixels.has(px + ',' + py)) d[i + 3] = 0
             }
+            cCtx.putImageData(imgData, 0, 0)
+            return c
           }
-          console.log('Opaque pixels in drag canvas:', opaquePixels)
-          dragCtx.putImageData(layerImageData, 0, 0)
-          console.log('Drag canvas created, dimensions:', dragRect.w, 'x', dragRect.h)
 
+          // Capture selected pixels for all selected layers
+          const selectedLayers = getSelectedLayers().filter(l => l.visible)
+          drawingState.draggedAllLayersData = selectedLayers.map(l => ({
+            layer: l,
+            canvas: extractSelectedPixels(l.ctx)
+          }))
+
+          // Keep single-layer canvas for backward compat (active layer)
+          drawingState.draggedPixelsCanvas = drawingState.draggedAllLayersData.find(
+            d => d.layer.id === state.activeLayerId
+          )?.canvas || extractSelectedPixels(layer.ctx)
+
+          console.log('Drag started on', drawingState.draggedAllLayersData.length, 'layers')
           break
         } else {
           // Click is outside the existing selection - clear it and start new one
@@ -1952,8 +2819,61 @@ function onCanvasMouseDown(e) {
       // Rigging doesn't require visible layer - just layer existence
       if (!layer) return
       if (state.rig.rigMode === 'create') {
-        drawingState.rigBoneStart = { x, y }
+        const joint = findBoneJointAtPixel(x, y)
+        if (joint) {
+          const jx = joint.endpoint === 'start' ? joint.bone.x1 : joint.bone.x2
+          const jy = joint.endpoint === 'start' ? joint.bone.y1 : joint.bone.y2
+          drawingState.rigBoneStart = { x: jx, y: jy }
+          drawingState.rigParentBoneId = joint.bone.id
+        } else {
+          drawingState.rigBoneStart = { x, y }
+          drawingState.rigParentBoneId = null
+        }
         drawingState.isDrawing = true
+      } else if (state.rig.rigMode === 'animate') {
+        // Try to grab a joint for dragging
+        const joint = findBoneJointAtPixel(x, y)
+        if (joint) {
+          // On first grab in a deformation session, save the clean base state
+          if (!state.rig.basePixels) {
+            state.rig.basePixels = layer.ctx.getImageData(0, 0, totalW(), totalH())
+            state.rig.baseBones = state.rig.bones.map(b => ({ ...b }))
+            state.rig.baseBoneWeights = { ...state.rig.boneWeights }
+          }
+          // Per-drag snapshots (always from current state for delta calc)
+          state.rig.originalBones = state.rig.bones.map(b => ({ ...b }))
+          state.rig.originalPixels = layer.ctx.getImageData(0, 0, totalW(), totalH())
+          drawingState.rigDragJoint = joint
+          drawingState.rigAnimating = true
+          drawingState.isDrawing = true
+          saveUndoState()
+        } else {
+          // Try to select a bone
+          const bone = findBoneAtPixel(x, y)
+          state.rig.selectedBoneId = bone ? bone.id : null
+          updateRigPanel()
+          renderRigVisualization()
+        }
+      } else if (state.rig.rigMode === 'paint') {
+        // Paint mode: assign pixels to the selected bone
+        if (state.rig.selectedBoneId !== null) {
+          drawingState.rigPainting = true
+          drawingState.isDrawing = true
+          paintBoneWeight(x, y, state.rig.selectedBoneId)
+          renderRigVisualization()
+        } else {
+          // If no bone selected, try to select one
+          const clickedBone = findBoneAtPixel(x, y)
+          state.rig.selectedBoneId = clickedBone ? clickedBone.id : null
+          updateRigPanel()
+          renderRigVisualization()
+        }
+      } else {
+        // Fallback: select a bone by clicking on canvas
+        const clickedBone = findBoneAtPixel(x, y)
+        state.rig.selectedBoneId = clickedBone ? clickedBone.id : null
+        updateRigPanel()
+        renderRigVisualization()
       }
       break
 
@@ -1967,6 +2887,16 @@ function onCanvasMouseDown(e) {
       updateCanvasDisplay()
       break
 
+    case 'hand':
+      drawingState.isPanning = true
+      drawingState.panStartX = e.clientX
+      drawingState.panStartY = e.clientY
+      drawingState.panScrollLeft = canvasContainer.scrollLeft
+      drawingState.panScrollTop = canvasContainer.scrollTop
+      canvasContainer.style.cursor = 'grabbing'
+      canvasWrapper.style.cursor = 'grabbing'
+      break
+
     case 'circle':
       // Circle requires visible layer
       if (!layer || !layer.visible) return
@@ -1974,6 +2904,7 @@ function onCanvasMouseDown(e) {
       drawingState.circleStart = { x, y }
       // Determine color: left-click = primary (currentColor), right-click = secondary
       drawingState.paintColor = e.button === 0 ? state.currentColor : state.secondaryColor
+      addToUserPalette(drawingState.paintColor)
       drawingState.isDrawing = true
       break
   }
@@ -1983,12 +2914,22 @@ function onCanvasMouseMove(e) {
   if (!state) return
 
   const { x, y } = getPixelCoords(e)
-  coordsDisplay.textContent = `X: ${x}, Y: ${y}`
+  coordsDisplay.textContent = `X: ${x - OVERFLOW_MARGIN}, Y: ${y - OVERFLOW_MARGIN}`
+
+  if (state.currentTool === 'hand') {
+    if (drawingState.isPanning) {
+      const dx = e.clientX - drawingState.panStartX
+      const dy = e.clientY - drawingState.panStartY
+      canvasContainer.scrollLeft = drawingState.panScrollLeft - dx
+      canvasContainer.scrollTop = drawingState.panScrollTop - dy
+    }
+    return
+  }
 
   if (!drawingState.isDrawing) {
     // Show preview cursor - but skip for tools that handle their own preview
     if (state.currentTool !== 'select' && state.currentTool !== 'rig' && state.currentTool !== 'zoom' && state.currentTool !== 'circle') {
-      previewCtx.clearRect(0, 0, state.width, state.height)
+      previewCtx.clearRect(0, 0, totalW(), totalH())
       if (state.currentTool === 'pencil' || state.currentTool === 'eraser') {
         previewCtx.fillStyle =
           state.currentTool === 'eraser'
@@ -2006,14 +2947,11 @@ function onCanvasMouseMove(e) {
       const maxX = Math.max(drawingState.selectStart.x, x)
       const minY = Math.min(drawingState.selectStart.y, y)
       const maxY = Math.max(drawingState.selectStart.y, y)
-      previewCtx.clearRect(0, 0, state.width, state.height)
-      previewCtx.strokeStyle = '#FFFFFF'
-      previewCtx.lineWidth = 1.5
-      previewCtx.setLineDash([1, 1])
-      previewCtx.strokeRect(minX - 0.2, minY - 0.2, maxX - minX + 0.4, maxY - minY + 0.4)
+      previewCtx.clearRect(0, 0, totalW(), totalH())
       previewCtx.strokeStyle = '#FFFF00'
       previewCtx.lineWidth = 1
-      previewCtx.lineDashOffset = 0.5
+      previewCtx.setLineDash([1, 1])
+      previewCtx.lineDashOffset = 0
       previewCtx.strokeRect(minX, minY, maxX - minX, maxY - minY)
       previewCtx.setLineDash([])
       return
@@ -2021,23 +2959,47 @@ function onCanvasMouseMove(e) {
     return
   }
 
-  const layer = state.layers[state.activeLayerIndex]
+  const layer = getActiveLayer()
   if (!layer) return
 
   switch (state.currentTool) {
     case 'pencil':
+      // If dragging a selection with pencil, move it (same logic as select/wand)
+      if (drawingState.dragSelection) {
+        const ddx = x - drawingState.dragStartX
+        const ddy = y - drawingState.dragStartY
+        const newX = drawingState.dragStartRectX + ddx
+        const newY = drawingState.dragStartRectY + ddy
+        drawingState.selectRect.x = newX
+        drawingState.selectRect.y = newY
+        previewCtx.clearRect(0, 0, totalW(), totalH())
+        if (drawingState.draggedPixelsCanvas) {
+          previewCtx.globalAlpha = 0.7
+          previewCtx.drawImage(drawingState.draggedPixelsCanvas, newX, newY)
+          previewCtx.globalAlpha = 1
+        }
+        const savedOffset = drawingState.marchingAntsOffset
+        drawingState.marchingAntsOffset = 0
+        drawMarchingAntsRect(newX, newY, drawingState.selectRect.w, drawingState.selectRect.h, previewCtx)
+        drawingState.marchingAntsOffset = savedOffset
+        break
+      }
       if (drawingState.lastPixelX !== -1) {
-        if (drawingState.brushSize === 1) {
-          drawLine(drawingState.lastPixelX, drawingState.lastPixelY, x, y, layer.ctx, false, drawingState.paintColor)
-        } else {
-          drawBrushLine(drawingState.lastPixelX, drawingState.lastPixelY, x, y, drawingState.brushSize, layer.ctx, false, drawingState.paintColor)
-        }
+        withMirrorLine(drawingState.lastPixelX, drawingState.lastPixelY, x, y, (x0, y0, x1, y1) => {
+          if (drawingState.brushSize === 1) {
+            drawLine(x0, y0, x1, y1, layer.ctx, false, drawingState.paintColor)
+          } else {
+            drawBrushLine(x0, y0, x1, y1, drawingState.brushSize, layer.ctx, false, drawingState.paintColor)
+          }
+        })
       } else {
-        if (drawingState.brushSize === 1) {
-          drawPixel(x, y, layer.ctx, drawingState.paintColor)
-        } else {
-          drawBrush(x, y, drawingState.brushSize, layer.ctx, drawingState.paintColor)
-        }
+        withMirror(x, y, (mx, my) => {
+          if (drawingState.brushSize === 1) {
+            drawPixel(mx, my, layer.ctx, drawingState.paintColor)
+          } else {
+            drawBrush(mx, my, drawingState.brushSize, layer.ctx, drawingState.paintColor)
+          }
+        })
       }
       drawingState.lastPixelX = x
       drawingState.lastPixelY = y
@@ -2046,17 +3008,21 @@ function onCanvasMouseMove(e) {
 
     case 'eraser':
       if (drawingState.lastPixelX !== -1) {
-        if (drawingState.brushSize === 1) {
-          drawLine(drawingState.lastPixelX, drawingState.lastPixelY, x, y, layer.ctx, true)
-        } else {
-          drawBrushLine(drawingState.lastPixelX, drawingState.lastPixelY, x, y, drawingState.brushSize, layer.ctx, true)
-        }
+        withMirrorLine(drawingState.lastPixelX, drawingState.lastPixelY, x, y, (x0, y0, x1, y1) => {
+          if (drawingState.brushSize === 1) {
+            drawLine(x0, y0, x1, y1, layer.ctx, true)
+          } else {
+            drawBrushLine(x0, y0, x1, y1, drawingState.brushSize, layer.ctx, true)
+          }
+        })
       } else {
-        if (drawingState.brushSize === 1) {
-          erasePixel(x, y, layer.ctx)
-        } else {
-          eraseBrush(x, y, drawingState.brushSize, layer.ctx)
-        }
+        withMirror(x, y, (mx, my) => {
+          if (drawingState.brushSize === 1) {
+            erasePixel(mx, my, layer.ctx)
+          } else {
+            eraseBrush(mx, my, drawingState.brushSize, layer.ctx)
+          }
+        })
       }
       drawingState.lastPixelX = x
       drawingState.lastPixelY = y
@@ -2065,7 +3031,7 @@ function onCanvasMouseMove(e) {
 
     case 'line':
       // Preview line
-      previewCtx.clearRect(0, 0, state.width, state.height)
+      previewCtx.clearRect(0, 0, totalW(), totalH())
       if (drawingState.lineStart) {
         previewCtx.fillStyle =
           drawingState.paintColor === 'transparent' ? '#FF00FF' : drawingState.paintColor
@@ -2074,7 +3040,7 @@ function onCanvasMouseMove(e) {
       break
 
     case 'rect':
-      previewCtx.clearRect(0, 0, state.width, state.height)
+      previewCtx.clearRect(0, 0, totalW(), totalH())
       if (drawingState.rectStart) {
         previewCtx.fillStyle =
           drawingState.paintColor === 'transparent' ? '#FF00FF' : drawingState.paintColor
@@ -2083,17 +3049,25 @@ function onCanvasMouseMove(e) {
       break
 
     case 'move':
-      if (drawingState.moveStart && drawingState.moveLayerData) {
+      if (drawingState.moveStart) {
         const dx = x - drawingState.moveStart.x
         const dy = y - drawingState.moveStart.y
-        layer.ctx.clearRect(0, 0, state.width, state.height)
-        layer.ctx.drawImage(drawingState.moveLayerData, dx, dy)
+        if (drawingState.moveAllLayersData && drawingState.moveAllLayersData.length > 0) {
+          // Move all selected layers simultaneously
+          for (const { layer: l, canvas } of drawingState.moveAllLayersData) {
+            l.ctx.clearRect(0, 0, totalW(), totalH())
+            l.ctx.drawImage(canvas, dx, dy)
+          }
+        } else if (drawingState.moveLayerData) {
+          layer.ctx.clearRect(0, 0, totalW(), totalH())
+          layer.ctx.drawImage(drawingState.moveLayerData, dx, dy)
+        }
         compositeAndDisplay()
       }
       break
 
     case 'circle':
-      previewCtx.clearRect(0, 0, state.width, state.height)
+      previewCtx.clearRect(0, 0, totalW(), totalH())
       if (drawingState.circleStart) {
         previewCtx.fillStyle =
           drawingState.paintColor === 'transparent' ? '#FF00FF' : drawingState.paintColor
@@ -2102,6 +3076,7 @@ function onCanvasMouseMove(e) {
       break
 
     case 'select':
+    case 'wand':
       if (drawingState.dragSelection) {
         // Handle dragging selection rectangle with pixels
         const dx = x - drawingState.dragStartX
@@ -2114,13 +3089,17 @@ function onCanvasMouseMove(e) {
         drawingState.selectRect.y = newY
 
         // Draw marching ants and dragged pixels on preview
-        previewCtx.clearRect(0, 0, state.width, state.height)
-        // Draw the dragged pixels at new position
-        if (drawingState.draggedPixelsCanvas) {
-          previewCtx.globalAlpha = 0.7
+        previewCtx.clearRect(0, 0, totalW(), totalH())
+        // Composite all selected layers' dragged pixels
+        previewCtx.globalAlpha = 0.7
+        if (drawingState.draggedAllLayersData && drawingState.draggedAllLayersData.length > 0) {
+          for (const { canvas } of drawingState.draggedAllLayersData) {
+            previewCtx.drawImage(canvas, newX, newY)
+          }
+        } else if (drawingState.draggedPixelsCanvas) {
           previewCtx.drawImage(drawingState.draggedPixelsCanvas, newX, newY)
-          previewCtx.globalAlpha = 1
         }
+        previewCtx.globalAlpha = 1
         // Draw marching ants at new position
         const savedOffset = drawingState.marchingAntsOffset
         drawingState.marchingAntsOffset = 0
@@ -2134,19 +3113,16 @@ function onCanvasMouseMove(e) {
         drawingState.selectRect = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 }
 
         // Draw preview of selection rect
-        previewCtx.clearRect(0, 0, state.width, state.height)
-        previewCtx.strokeStyle = '#FFFFFF'
-        previewCtx.lineWidth = 1.5
-        previewCtx.setLineDash([1, 1])
-        previewCtx.strokeRect(minX - 0.2, minY - 0.2, maxX - minX + 0.4, maxY - minY + 0.4)
+        previewCtx.clearRect(0, 0, totalW(), totalH())
         previewCtx.strokeStyle = '#FFFF00'
         previewCtx.lineWidth = 1
-        previewCtx.lineDashOffset = 0.5
+        previewCtx.setLineDash([1, 1])
+        previewCtx.lineDashOffset = 0
         previewCtx.strokeRect(minX, minY, maxX - minX, maxY - minY)
         previewCtx.setLineDash([])
       } else if (drawingState.pasteMode && drawingState.clipboardCanvas) {
         // Moving pasted content - show clipboard image following the mouse
-        previewCtx.clearRect(0, 0, state.width, state.height)
+        previewCtx.clearRect(0, 0, totalW(), totalH())
         // Draw marching ants around the area to be pasted
         drawMarchingAntsRect(x, y, drawingState.clipboardCanvas.width, drawingState.clipboardCanvas.height, previewCtx)
         // Draw the pasted content semi-transparent
@@ -2162,7 +3138,37 @@ function onCanvasMouseMove(e) {
 
     case 'rig':
       if (drawingState.isDrawing && drawingState.rigBoneStart) {
+        // Creating a new bone - show preview
         renderRigPreview(drawingState.rigBoneStart, { x, y })
+      } else if (drawingState.isDrawing && drawingState.rigDragJoint && drawingState.rigAnimating) {
+        // Animate mode - rotation only, preserve bone length
+        const joint = drawingState.rigDragJoint
+        const origBone = state.rig.originalBones.find(b => b.id === joint.bone.id)
+        if (origBone) {
+          if (joint.endpoint === 'end') {
+            // Rotate around start joint, keep original length
+            const angle = Math.atan2(y - joint.bone.y1, x - joint.bone.x1)
+            joint.bone.x2 = joint.bone.x1 + Math.cos(angle) * origBone.length
+            joint.bone.y2 = joint.bone.y1 + Math.sin(angle) * origBone.length
+          } else {
+            // Moving start joint: shift the whole bone, keep direction & length
+            const dx = x - joint.bone.x1
+            const dy = y - joint.bone.y1
+            joint.bone.x1 = x
+            joint.bone.y1 = y
+            joint.bone.x2 += dx
+            joint.bone.y2 += dy
+          }
+          // Propagate transform to children so chain follows the parent
+          propagateChildBones(joint.bone.id)
+        }
+        // Apply pixel deformation for all bones that changed
+        applyRigDeformation()
+        renderRigVisualization()
+      } else if (drawingState.isDrawing && drawingState.rigPainting) {
+        // Paint mode - assign pixels to selected bone while dragging
+        paintBoneWeight(x, y, state.rig.selectedBoneId)
+        renderRigVisualization()
       } else {
         renderRigVisualization()
       }
@@ -2173,46 +3179,50 @@ function onCanvasMouseMove(e) {
 function onCanvasMouseUp(e) {
   if (!drawingState.isDrawing) return
 
-  const layer = state.layers[state.activeLayerIndex]
+  const layer = getActiveLayer()
 
   if (state.currentTool === 'line' && drawingState.lineStart) {
     const { x, y } = getPixelCoords(e)
-    drawLine(drawingState.lineStart.x, drawingState.lineStart.y, x, y, layer.ctx, false, drawingState.paintColor)
+    withMirrorLine(drawingState.lineStart.x, drawingState.lineStart.y, x, y, (x0, y0, x1, y1) => {
+      drawLine(x0, y0, x1, y1, layer.ctx, false, drawingState.paintColor)
+    })
     drawingState.lineStart = null
-    previewCtx.clearRect(0, 0, state.width, state.height)
+    previewCtx.clearRect(0, 0, totalW(), totalH())
     compositeAndDisplay()
   }
 
   if (state.currentTool === 'rect' && drawingState.rectStart) {
     const { x, y } = getPixelCoords(e)
-    drawRectOutline(drawingState.rectStart.x, drawingState.rectStart.y, x, y, layer.ctx, drawingState.paintColor)
+    withMirrorLine(drawingState.rectStart.x, drawingState.rectStart.y, x, y, (x0, y0, x1, y1) => {
+      drawRectOutline(x0, y0, x1, y1, layer.ctx, drawingState.paintColor)
+    })
     drawingState.rectStart = null
-    previewCtx.clearRect(0, 0, state.width, state.height)
+    previewCtx.clearRect(0, 0, totalW(), totalH())
     compositeAndDisplay()
   }
 
   if (state.currentTool === 'circle' && drawingState.circleStart) {
     const { x, y } = getPixelCoords(e)
-    drawCircleOutline(drawingState.circleStart.x, drawingState.circleStart.y, x, y, layer.ctx, drawingState.paintColor)
+    withMirrorLine(drawingState.circleStart.x, drawingState.circleStart.y, x, y, (x0, y0, x1, y1) => {
+      drawCircleOutline(x0, y0, x1, y1, layer.ctx, drawingState.paintColor)
+    })
     drawingState.circleStart = null
-    previewCtx.clearRect(0, 0, state.width, state.height)
+    previewCtx.clearRect(0, 0, totalW(), totalH())
     compositeAndDisplay()
   }
 
-  if (state.currentTool === 'select' && drawingState.dragSelection) {
+  if ((state.currentTool === 'select' || state.currentTool === 'wand' || state.currentTool === 'pencil') && drawingState.dragSelection) {
     // Finalize dragging selection - apply pixel changes
     const dx = drawingState.selectRect.x - drawingState.dragStartRectX
     const dy = drawingState.selectRect.y - drawingState.dragStartRectY
 
-    console.log('Finalizing drag:', { dx, dy, dragStartRect: { x: drawingState.dragStartRectX, y: drawingState.dragStartRectY }, newRect: drawingState.selectRect })
+    const hasData = drawingState.draggedAllLayersData
+      ? drawingState.draggedAllLayersData.length > 0
+      : !!drawingState.draggedPixelsCanvas
 
-    if ((dx !== 0 || dy !== 0) && drawingState.draggedPixelsCanvas) {
-      // Save undo state
+    if ((dx !== 0 || dy !== 0) && hasData) {
       saveUndoState()
 
-      const layer = state.layers[state.activeLayerIndex]
-
-      // Clear only the selected pixels at old position
       const oldRect = {
         x: drawingState.dragStartRectX,
         y: drawingState.dragStartRectY,
@@ -2220,45 +3230,41 @@ function onCanvasMouseUp(e) {
         h: drawingState.selectRect.h
       }
 
-      console.log('Clearing old position:', oldRect)
+      // Determine which layers to operate on
+      const layersToMove = drawingState.draggedAllLayersData
+        ? drawingState.draggedAllLayersData
+        : [{ layer: getActiveLayer(), canvas: drawingState.draggedPixelsCanvas }]
 
-      // Clear old pixels by making selected ones transparent
-      const oldImageData = layer.ctx.getImageData(oldRect.x, oldRect.y, oldRect.w, oldRect.h)
-      const oldData = oldImageData.data
-      let clearedPixels = 0
-      for (let i = 0; i < oldData.length; i += 4) {
-        const pixelIndex = i / 4
-        const px = oldRect.x + (pixelIndex % oldRect.w)
-        const py = oldRect.y + Math.floor(pixelIndex / oldRect.w)
-        const pixelKey = px + ',' + py
-
-        // Clear only pixels that were selected
-        if (drawingState.selectedPixels.has(pixelKey)) {
-          oldData[i + 3] = 0  // Set alpha to 0
-          clearedPixels++
+      for (const { layer: l, canvas } of layersToMove) {
+        if (!l) continue
+        // Clear selected pixels at old position
+        const oldImageData = l.ctx.getImageData(oldRect.x, oldRect.y, oldRect.w, oldRect.h)
+        const oldData = oldImageData.data
+        for (let i = 0; i < oldData.length; i += 4) {
+          const pi = i / 4
+          const px = oldRect.x + (pi % oldRect.w)
+          const py = oldRect.y + Math.floor(pi / oldRect.w)
+          if (drawingState.selectedPixels.has(px + ',' + py)) oldData[i + 3] = 0
         }
+        l.ctx.putImageData(oldImageData, oldRect.x, oldRect.y)
+        // Draw at new position
+        l.ctx.drawImage(canvas, drawingState.selectRect.x, drawingState.selectRect.y)
       }
-      console.log('Cleared pixels at old position:', clearedPixels)
-      layer.ctx.putImageData(oldImageData, oldRect.x, oldRect.y)
 
-      // Draw pixels at new position
-      console.log('Drawing at new position:', { x: drawingState.selectRect.x, y: drawingState.selectRect.y, canvasSize: drawingState.draggedPixelsCanvas.width + 'x' + drawingState.draggedPixelsCanvas.height })
-      layer.ctx.drawImage(drawingState.draggedPixelsCanvas, drawingState.selectRect.x, drawingState.selectRect.y)
-
-      // Update display
       compositeAndDisplay()
     }
 
     // Clear drag state
     drawingState.dragSelection = false
     drawingState.draggedPixelsCanvas = null
-    previewCtx.clearRect(0, 0, state.width, state.height)
+    drawingState.draggedAllLayersData = null
+    previewCtx.clearRect(0, 0, totalW(), totalH())
     startMarchingAntsAnimation()
     drawingState.isDrawing = false
     return
   }
 
-  if (state.currentTool === 'select' && drawingState.selectRect && !drawingState.pasteMode) {
+  if ((state.currentTool === 'select' || state.currentTool === 'wand') && drawingState.selectRect && !drawingState.pasteMode) {
     // Finalize selection with mode logic
     const rect = drawingState.selectRect
     console.log('Finalizing selection rect:', rect)
@@ -2270,8 +3276,8 @@ function onCanvasMouseUp(e) {
 
       case 'add':
         // Union: add pixels from new rect
-        for (let px = rect.x; px < rect.x + rect.w && px < state.width; px++) {
-          for (let py = rect.y; py < rect.y + rect.h && py < state.height; py++) {
+        for (let px = rect.x; px < rect.x + rect.w && px < totalW(); px++) {
+          for (let py = rect.y; py < rect.y + rect.h && py < totalH(); py++) {
             drawingState.selectedPixels.add(px + ',' + py)
           }
         }
@@ -2280,8 +3286,8 @@ function onCanvasMouseUp(e) {
 
       case 'subtract':
         // Difference: remove pixels from rect
-        for (let px = rect.x; px < rect.x + rect.w && px < state.width; px++) {
-          for (let py = rect.y; py < rect.y + rect.h && py < state.height; py++) {
+        for (let px = rect.x; px < rect.x + rect.w && px < totalW(); px++) {
+          for (let py = rect.y; py < rect.y + rect.h && py < totalH(); py++) {
             drawingState.selectedPixels.delete(px + ',' + py)
           }
         }
@@ -2290,16 +3296,16 @@ function onCanvasMouseUp(e) {
     }
 
     startMarchingAntsAnimation()
-    previewCtx.clearRect(0, 0, state.width, state.height)
+    previewCtx.clearRect(0, 0, totalW(), totalH())
     $('#btnCopySelection').style.display = 'block'
-  } else if (state.currentTool === 'select' && drawingState.pasteMode && drawingState.clipboardCanvas) {
+  } else if ((state.currentTool === 'select' || state.currentTool === 'wand') && drawingState.pasteMode && drawingState.clipboardCanvas) {
     // Finalize paste position - place clipboard at current mouse position
     const { x, y } = getPixelCoords(e)
     saveUndoState()
     layer.ctx.drawImage(drawingState.clipboardCanvas, x, y)
     compositeAndDisplay()
     stopMarchingAntsAnimation()
-    previewCtx.clearRect(0, 0, state.width, state.height)
+    previewCtx.clearRect(0, 0, totalW(), totalH())
     drawingState.pasteMode = false
     drawingState.selectedPixels.clear()
     $('#btnCopySelection').style.display = 'none'
@@ -2308,10 +3314,36 @@ function onCanvasMouseUp(e) {
 
   if (state.currentTool === 'rig' && drawingState.rigBoneStart) {
     const { x, y } = getPixelCoords(e)
-    addBone(drawingState.rigBoneStart.x, drawingState.rigBoneStart.y, x, y, null)
+    const endJoint = findBoneJointAtPixel(x, y)
+    const endX = endJoint ? (endJoint.endpoint === 'start' ? endJoint.bone.x1 : endJoint.bone.x2) : x
+    const endY = endJoint ? (endJoint.endpoint === 'start' ? endJoint.bone.y1 : endJoint.bone.y2) : y
+    const parentId = drawingState.rigParentBoneId
+    addBone(drawingState.rigBoneStart.x, drawingState.rigBoneStart.y, endX, endY, parentId)
     drawingState.rigBoneStart = null
-    previewCtx.clearRect(0, 0, state.width, state.height)
+    drawingState.rigParentBoneId = null
     renderRigVisualization()
+  }
+
+  if (state.currentTool === 'rig' && drawingState.rigDragJoint) {
+    // Finalize animate deformation - update bone weights to new pixel positions
+    updateBoneWeightsAfterDeformation()
+    drawingState.rigDragJoint = null
+    drawingState.rigAnimating = false
+    state.rig.originalBones = null
+    state.rig.originalPixels = null
+    // Keep baseBones/basePixels/baseBoneWeights alive for next grab
+    compositeAndDisplay()
+    renderRigVisualization()
+  }
+
+  if (state.currentTool === 'rig' && drawingState.rigPainting) {
+    drawingState.rigPainting = false
+  }
+
+  if (state.currentTool === 'hand' && drawingState.isPanning) {
+    drawingState.isPanning = false
+    canvasContainer.style.cursor = 'grab'
+    canvasWrapper.style.cursor = 'grab'
   }
 
   drawingState.isDrawing = false
@@ -2319,6 +3351,8 @@ function onCanvasMouseUp(e) {
   drawingState.lastPixelY = -1
   drawingState.moveStart = null
   drawingState.moveLayerData = null
+  drawingState.moveAllLayersData = null
+  drawingState.draggedAllLayersData = null
   drawingState.selectStart = null
   drawingState.dragSelection = false
   drawingState.paintColor = null
@@ -2440,6 +3474,385 @@ function drawCirclePreview(x0, y0, x1, y1, targetCtx, color = null) {
 // ==========================================
 // RIGGING / SKELETAL ANIMATION
 // ==========================================
+
+// Convert pixel coords to display coords for rigOverlay
+function pixelToDisplay(px, py) {
+  const displayW = rigOverlay.width
+  const displayH = rigOverlay.height
+  return {
+    x: (px / totalW()) * displayW,
+    y: (py / totalH()) * displayH
+  }
+}
+
+// Paint bone weight: assign a pixel (and surrounding area) to a bone
+function paintBoneWeight(px, py, boneId) {
+  const radius = Math.max(1, Math.floor(drawingState.brushSize / 2))
+  for (let dx = -radius; dx <= radius; dx++) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      const nx = px + dx
+      const ny = py + dy
+      if (nx >= 0 && nx < totalW() && ny >= 0 && ny < totalH()) {
+        if (dx * dx + dy * dy <= radius * radius) {
+          state.rig.boneWeights[nx + ',' + ny] = boneId
+        }
+      }
+    }
+  }
+}
+
+// Apply rig deformation: transform pixels based on bone movements.
+// Uses a combined forward + inverse mapping strategy:
+//  - Forward pass places every source pixel at its destination (no gaps in coverage)
+//  - Inverse pass fills any remaining empty pixels (no gaps from rounding)
+// Then a connectivity-aware cleanup removes pixel-doubling artifacts
+// that break 1px line art.
+function applyRigDeformation() {
+  if (!state.rig.originalBones || !state.rig.originalPixels) return
+  const layer = getActiveLayer()
+  if (!layer) return
+
+  const w = totalW()
+  const h = totalH()
+
+  // Always transform from the CLEAN base if available, so repeated
+  // grab-drag-release cycles don't accumulate rounding errors.
+  const useBase = !!state.rig.basePixels
+  const srcPixels = useBase ? state.rig.basePixels : state.rig.originalPixels
+  const srcBones  = useBase ? state.rig.baseBones  : state.rig.originalBones
+  const srcWeights = useBase ? state.rig.baseBoneWeights : state.rig.boneWeights
+
+  const origData = srcPixels.data
+  const newImageData = layer.ctx.createImageData(w, h)
+  const newData = newImageData.data
+
+  // Copy all non-weighted pixels as-is
+  for (let i = 0; i < origData.length; i++) {
+    newData[i] = origData[i]
+  }
+
+  // Build per-bone transforms from the BASE bone positions to CURRENT positions
+  const boneTransforms = []
+  state.rig.bones.forEach((bone) => {
+    const baseBone = srcBones.find(b => b.id === bone.id)
+    if (!baseBone) return
+
+    const baseAngle = Math.atan2(baseBone.y2 - baseBone.y1, baseBone.x2 - baseBone.x1)
+    const curAngle = Math.atan2(bone.y2 - bone.y1, bone.x2 - bone.x1)
+    const deltaAngle = curAngle - baseAngle
+
+    const translateX = bone.x1 - baseBone.x1
+    const translateY = bone.y1 - baseBone.y1
+
+    const pivotX = baseBone.x1 + 0.5
+    const pivotY = baseBone.y1 + 0.5
+
+    const cosF = Math.cos(deltaAngle)
+    const sinF = Math.sin(deltaAngle)
+    const cosInv = Math.cos(-deltaAngle)
+    const sinInv = Math.sin(-deltaAngle)
+
+    boneTransforms.push({
+      boneId: bone.id, deltaAngle,
+      translateX, translateY,
+      pivotX, pivotY,
+      cosF, sinF, cosInv, sinInv
+    })
+  })
+
+  // Collect weighted pixels (from base weights) and clear them from the base
+  const weightedPixels = {} // boneId -> [{x,y}]
+  const boneBounds = {}     // boneId -> destination bounding box
+  for (const key in srcWeights) {
+    const boneId = srcWeights[key]
+    const t = boneTransforms.find(bt => bt.boneId === boneId)
+    if (!t) continue
+    const [px, py] = key.split(',').map(Number)
+    if (px < 0 || px >= w || py < 0 || py >= h) continue
+
+    if (!weightedPixels[boneId]) weightedPixels[boneId] = []
+    weightedPixels[boneId].push({ x: px, y: py })
+
+    // Clear from base
+    const idx = (py * w + px) * 4
+    newData[idx] = 0; newData[idx + 1] = 0
+    newData[idx + 2] = 0; newData[idx + 3] = 0
+  }
+
+  // Track which destination pixels were written by bones (for cleanup)
+  const boneWritten = new Uint8Array(w * h)
+
+  boneTransforms.forEach((t) => {
+    const pixels = weightedPixels[t.boneId]
+    if (!pixels || pixels.length === 0) return
+
+    // ---- PASS 1: Forward mapping (source → dest) ----
+    // Guarantees every source pixel appears at least once in output
+    for (const { x: px, y: py } of pixels) {
+      const si = (py * w + px) * 4
+      if (origData[si + 3] === 0) continue
+
+      const relX = (px + 0.5) - t.pivotX
+      const relY = (py + 0.5) - t.pivotY
+      const dstX = Math.floor(relX * t.cosF - relY * t.sinF + t.pivotX + t.translateX)
+      const dstY = Math.floor(relX * t.sinF + relY * t.cosF + t.pivotY + t.translateY)
+
+      if (dstX < 0 || dstX >= w || dstY < 0 || dstY >= h) continue
+      const di = (dstY * w + dstX) * 4
+      // Only write if destination is empty (don't overwrite other bone data)
+      if (newData[di + 3] === 0) {
+        newData[di] = origData[si]
+        newData[di + 1] = origData[si + 1]
+        newData[di + 2] = origData[si + 2]
+        newData[di + 3] = origData[si + 3]
+        boneWritten[dstY * w + dstX] = 1
+      }
+    }
+
+    // ---- PASS 2: Inverse mapping (dest → source) ----
+    // Fills gaps the forward pass missed due to rounding
+    // Compute destination bounds from forward-mapped pixels
+    let dMinX = w, dMinY = h, dMaxX = 0, dMaxY = 0
+    for (const { x: px, y: py } of pixels) {
+      const relX = (px + 0.5) - t.pivotX
+      const relY = (py + 0.5) - t.pivotY
+      const dstX = Math.floor(relX * t.cosF - relY * t.sinF + t.pivotX + t.translateX)
+      const dstY = Math.floor(relX * t.sinF + relY * t.cosF + t.pivotY + t.translateY)
+      if (dstX < dMinX) dMinX = dstX
+      if (dstY < dMinY) dMinY = dstY
+      if (dstX > dMaxX) dMaxX = dstX
+      if (dstY > dMaxY) dMaxY = dstY
+    }
+    const startX = Math.max(0, dMinX - 1)
+    const endX = Math.min(w - 1, dMaxX + 1)
+    const startY = Math.max(0, dMinY - 1)
+    const endY = Math.min(h - 1, dMaxY + 1)
+
+    for (let dy = startY; dy <= endY; dy++) {
+      for (let dx = startX; dx <= endX; dx++) {
+        const di = (dy * w + dx) * 4
+        // Only fill if pixel is still empty
+        if (newData[di + 3] !== 0) continue
+
+        // Inverse transform: destination → original source
+        const relX = (dx + 0.5) - t.pivotX - t.translateX
+        const relY = (dy + 0.5) - t.pivotY - t.translateY
+        const srcFX = relX * t.cosInv - relY * t.sinInv + t.pivotX
+        const srcFY = relX * t.sinInv + relY * t.cosInv + t.pivotY
+        const srcX = Math.floor(srcFX)
+        const srcY = Math.floor(srcFY)
+
+        if (srcX < 0 || srcX >= w || srcY < 0 || srcY >= h) continue
+        if (srcWeights[srcX + ',' + srcY] !== t.boneId) continue
+
+        const si = (srcY * w + srcX) * 4
+        if (origData[si + 3] === 0) continue
+
+        newData[di] = origData[si]
+        newData[di + 1] = origData[si + 1]
+        newData[di + 2] = origData[si + 2]
+        newData[di + 3] = origData[si + 3]
+        boneWritten[dy * w + dx] = 1
+      }
+    }
+  })
+
+  // ---- PASS 3: Pixel-art cleanup ----
+  // Remove "staircase doubles": when rotation creates 2×1 or 1×2 blocks
+  // where the original had only 1px lines. We detect isolated doubled
+  // outline pixels and thin them. Only acts on dark outline pixels that
+  // form a 2-wide band between two empty regions (actual line doubling).
+  const cleaned = new Uint8ClampedArray(newData)
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      if (!boneWritten[y * w + x]) continue
+      const ci = (y * w + x) * 4
+      if (cleaned[ci + 3] === 0) continue
+
+      // Only clean dark pixels (outlines), skip fills
+      const brightness = cleaned[ci] + cleaned[ci + 1] + cleaned[ci + 2]
+      if (brightness > 200) continue  // Not an outline pixel
+
+      // Count same-color orthogonal neighbors
+      const up    = ((y - 1) * w + x) * 4
+      const down  = ((y + 1) * w + x) * 4
+      const left  = (y * w + (x - 1)) * 4
+      const right = (y * w + (x + 1)) * 4
+
+      const isSimColor = (ni) =>
+        cleaned[ni + 3] > 0 &&
+        Math.abs(cleaned[ni] - cleaned[ci]) < 30 &&
+        Math.abs(cleaned[ni + 1] - cleaned[ci + 1]) < 30 &&
+        Math.abs(cleaned[ni + 2] - cleaned[ci + 2]) < 30
+
+      const hasUp = isSimColor(up)
+      const hasDown = isSimColor(down)
+      const hasLeft = isSimColor(left)
+      const hasRight = isSimColor(right)
+
+      // Only remove if this pixel is part of a 2-wide line doubling:
+      // it has a same-color neighbor on one axis AND empty on both sides
+      // of the perpendicular axis (meaning it's a doubled outline, not fill)
+      const horizontalPair = (hasLeft || hasRight) && cleaned[up + 3] === 0 && cleaned[down + 3] === 0
+      const verticalPair   = (hasUp || hasDown) && cleaned[left + 3] === 0 && cleaned[right + 3] === 0
+
+      if (horizontalPair || verticalPair) {
+        newData[ci] = 0; newData[ci + 1] = 0
+        newData[ci + 2] = 0; newData[ci + 3] = 0
+      }
+    }
+  }
+
+  layer.ctx.putImageData(newImageData, 0, 0)
+  compositeAndDisplay()
+}
+
+// After deformation, remap boneWeights using the same inverse-mapping logic
+// as the deformation itself (nearest-neighbor, bone ownership check). This
+// preserves mask coverage and avoids leaving pixels behind on next moves.
+function updateBoneWeightsAfterDeformation() {
+  if (!state.rig.originalBones) return
+  const w = totalW()
+  const h = totalH()
+  const newWeights = {}
+
+  // Use base weights/bones when available for accuracy across multiple drags
+  const refBones = state.rig.baseBones || state.rig.originalBones
+  const refWeights = state.rig.baseBoneWeights || state.rig.boneWeights
+
+  // Build inverse transforms (current -> original)
+  const boneTransforms = []
+  state.rig.bones.forEach((bone) => {
+    const origBone = refBones.find(b => b.id === bone.id)
+    if (!origBone) return
+
+    const origAngle = Math.atan2(origBone.y2 - origBone.y1, origBone.x2 - origBone.x1)
+    const newAngle = Math.atan2(bone.y2 - bone.y1, bone.x2 - bone.x1)
+    const deltaAngle = newAngle - origAngle
+
+    const translateX = bone.x1 - origBone.x1
+    const translateY = bone.y1 - origBone.y1
+
+    const pivotX = origBone.x1 + 0.5
+    const pivotY = origBone.y1 + 0.5
+
+    const cosInv = Math.cos(-deltaAngle)
+    const sinInv = Math.sin(-deltaAngle)
+
+    boneTransforms.push({
+      boneId: bone.id,
+      translateX, translateY,
+      pivotX, pivotY,
+      cosInv, sinInv
+    })
+  })
+
+  // Bounding boxes for destination pixels per bone (using forward approx)
+  const boneBounds = {}
+  for (const key in refWeights) {
+    const boneId = refWeights[key]
+    const t = boneTransforms.find(bt => bt.boneId === boneId)
+    if (!t) continue
+    const [px, py] = key.split(',').map(Number)
+    if (px < 0 || px >= w || py < 0 || py >= h) continue
+
+    const cosF = t.cosInv
+    const sinF = -t.sinInv
+    const relX = (px + 0.5) - t.pivotX
+    const relY = (py + 0.5) - t.pivotY
+    const dstX = Math.round(relX * cosF - relY * sinF + t.pivotX + t.translateX - 0.5)
+    const dstY = Math.round(relX * sinF + relY * cosF + t.pivotY + t.translateY - 0.5)
+
+    if (!boneBounds[boneId]) {
+      boneBounds[boneId] = { minX: dstX, minY: dstY, maxX: dstX, maxY: dstY }
+    } else {
+      const bb = boneBounds[boneId]
+      if (dstX < bb.minX) bb.minX = dstX
+      if (dstY < bb.minY) bb.minY = dstY
+      if (dstX > bb.maxX) bb.maxX = dstX
+      if (dstY > bb.maxY) bb.maxY = dstY
+    }
+  }
+
+  // Inverse map to fill newWeights at destination
+  boneTransforms.forEach((t) => {
+    const bb = boneBounds[t.boneId]
+    if (!bb) return
+
+    const startX = Math.max(0, bb.minX - 1)
+    const endX = Math.min(w - 1, bb.maxX + 1)
+    const startY = Math.max(0, bb.minY - 1)
+    const endY = Math.min(h - 1, bb.maxY + 1)
+
+    for (let dy = startY; dy <= endY; dy++) {
+      for (let dx = startX; dx <= endX; dx++) {
+        const relX = (dx + 0.5) - t.pivotX - t.translateX
+        const relY = (dy + 0.5) - t.pivotY - t.translateY
+        const srcFX = relX * t.cosInv - relY * t.sinInv + t.pivotX
+        const srcFY = relX * t.sinInv + relY * t.cosInv + t.pivotY
+
+        const srcX = Math.round(srcFX - 0.5)
+        const srcY = Math.round(srcFY - 0.5)
+
+        if (srcX < 0 || srcX >= w || srcY < 0 || srcY >= h) continue
+        if (refWeights[srcX + ',' + srcY] !== t.boneId) continue
+
+        newWeights[dx + ',' + dy] = t.boneId
+      }
+    }
+  })
+
+  state.rig.boneWeights = newWeights
+}
+
+// Auto-assign bone weights: for each non-transparent pixel, assign it to the nearest bone
+function autoAssignBoneWeights() {
+  if (!state || state.rig.bones.length === 0) return
+  const layer = getActiveLayer()
+  if (!layer) return
+
+  const w = totalW()
+  const h = totalH()
+  const imgData = layer.ctx.getImageData(0, 0, w, h)
+  const data = imgData.data
+
+  state.rig.boneWeights = {}
+
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const idx = (py * w + px) * 4
+      // Skip transparent pixels
+      if (data[idx + 3] === 0) continue
+
+      // Find nearest bone (distance from pixel center to bone line segment)
+      let nearestBoneId = null
+      let nearestDist = Infinity
+
+      state.rig.bones.forEach((bone) => {
+        const dx = bone.x2 - bone.x1
+        const dy = bone.y2 - bone.y1
+        const lenSq = dx * dx + dy * dy
+        if (lenSq === 0) return
+
+        let t = ((px - bone.x1) * dx + (py - bone.y1) * dy) / lenSq
+        t = Math.max(0, Math.min(1, t))
+        const projX = bone.x1 + t * dx
+        const projY = bone.y1 + t * dy
+        const dist = Math.hypot(px - projX, py - projY)
+
+        if (dist < nearestDist) {
+          nearestDist = dist
+          nearestBoneId = bone.id
+        }
+      })
+
+      if (nearestBoneId !== null) {
+        state.rig.boneWeights[px + ',' + py] = nearestBoneId
+      }
+    }
+  }
+}
+
 function addBone(x1, y1, x2, y2, parentId) {
   const length = Math.hypot(x2 - x1, y2 - y1)
 
@@ -2461,65 +3874,252 @@ function addBone(x1, y1, x2, y2, parentId) {
   state.rig.bones.push(bone)
   state.rig.boneColors[boneId] = getRandomBoneColor()
   updateRigPanel()
+  renderRigVisualization()
+}
+
+function findBoneAtPixel(px, py) {
+  // Find the closest bone to a pixel coordinate (for selection)
+  const threshold = 1.5 // pixels distance threshold
+  let closestBone = null
+  let closestDist = Infinity
+
+  state.rig.bones.forEach((bone) => {
+    // Distance from point to line segment
+    const dx = bone.x2 - bone.x1
+    const dy = bone.y2 - bone.y1
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) return
+
+    let t = ((px - bone.x1) * dx + (py - bone.y1) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = bone.x1 + t * dx
+    const projY = bone.y1 + t * dy
+    const dist = Math.hypot(px - projX, py - projY)
+
+    if (dist < threshold && dist < closestDist) {
+      closestDist = dist
+      closestBone = bone
+    }
+  })
+
+  return closestBone
+}
+
+function findBoneJointAtPixel(px, py) {
+  // Find if clicking near a bone joint (endpoint) for dragging in animate mode
+  const threshold = 1.5
+  let closestJoint = null
+  let closestDist = Infinity
+
+  state.rig.bones.forEach((bone) => {
+    // Check start joint
+    const d1 = Math.hypot(px - bone.x1, py - bone.y1)
+    if (d1 < threshold && d1 < closestDist) {
+      closestDist = d1
+      closestJoint = { bone, endpoint: 'start' }
+    }
+    // Check end joint
+    const d2 = Math.hypot(px - bone.x2, py - bone.y2)
+    if (d2 < threshold && d2 < closestDist) {
+      closestDist = d2
+      closestJoint = { bone, endpoint: 'end' }
+    }
+  })
+
+  return closestJoint
+}
+
+// Forward transform helper (rotate around pivot, then translate)
+function transformPoint(px, py, pivotX, pivotY, cosA, sinA, translateX, translateY) {
+  const relX = (px + 0.5) - pivotX
+  const relY = (py + 0.5) - pivotY
+  const rotX = relX * cosA - relY * sinA
+  const rotY = relX * sinA + relY * cosA
+  const nx = Math.round(rotX + pivotX + translateX - 0.5)
+  const ny = Math.round(rotY + pivotY + translateY - 0.5)
+  return { x: nx, y: ny }
+}
+
+// Propagate a moved bone's transform to all its descendants (chain effect)
+function propagateChildBones(parentId) {
+  const origParent = state.rig.originalBones ? state.rig.originalBones.find(b => b.id === parentId) : null
+  const parent = state.rig.bones.find(b => b.id === parentId)
+  if (!origParent || !parent) return
+
+  const origAngle = Math.atan2(origParent.y2 - origParent.y1, origParent.x2 - origParent.x1)
+  const newAngle = Math.atan2(parent.y2 - parent.y1, parent.x2 - parent.x1)
+  const deltaAngle = newAngle - origAngle
+  const translateX = parent.x1 - origParent.x1
+  const translateY = parent.y1 - origParent.y1
+  const pivotX = origParent.x1 + 0.5
+  const pivotY = origParent.y1 + 0.5
+  const cosA = Math.cos(deltaAngle)
+  const sinA = Math.sin(deltaAngle)
+
+  // Apply parent transform to each child, then recurse
+  state.rig.bones.forEach((child) => {
+    if (child.parentId !== parentId) return
+    const origChild = state.rig.originalBones.find(b => b.id === child.id)
+    if (!origChild) return
+
+    const p1 = transformPoint(origChild.x1, origChild.y1, pivotX, pivotY, cosA, sinA, translateX, translateY)
+    const p2 = transformPoint(origChild.x2, origChild.y2, pivotX, pivotY, cosA, sinA, translateX, translateY)
+
+    child.x1 = p1.x
+    child.y1 = p1.y
+    child.x2 = p2.x
+    child.y2 = p2.y
+    child.length = Math.hypot(child.x2 - child.x1, child.y2 - child.y1)
+
+    propagateChildBones(child.id)
+  })
 }
 
 function renderRigVisualization() {
   if (!state || !state.rig) return
-  previewCtx.clearRect(0, 0, state.width, state.height)
+  const dw = rigOverlay.width
+  const dh = rigOverlay.height
+  if (dw === 0 || dh === 0) return
+
+  rigCtx.clearRect(0, 0, dw, dh)
+
+  // Only draw if rig tool is active
+  if (state.currentTool !== 'rig') return
+
+  const cellW = dw / totalW()
+  const cellH = dh / totalH()
+  const jointRadius = Math.max(4, cellW * 0.35)
+  const lineWidth = Math.max(2, cellW * 0.15)
+
+  // Draw bone weight overlay (paint mode or always show subtle)
+  if (state.rig.rigMode === 'paint' && Object.keys(state.rig.boneWeights).length > 0) {
+    rigCtx.globalAlpha = 0.35
+    for (const key in state.rig.boneWeights) {
+      const boneId = state.rig.boneWeights[key]
+      const color = state.rig.boneColors[boneId]
+      if (!color) continue
+      const [px, py] = key.split(',').map(Number)
+      rigCtx.fillStyle = color
+      rigCtx.fillRect(px * cellW, py * cellH, cellW, cellH)
+    }
+    rigCtx.globalAlpha = 1.0
+  }
 
   // Draw all bones
   state.rig.bones.forEach((bone) => {
-    const color = state.rig.boneColors[bone.id] || '#ffffff'
-    previewCtx.strokeStyle = color
-    previewCtx.lineWidth = 0.8
-    previewCtx.beginPath()
-    previewCtx.moveTo(bone.x1, bone.y1)
-    previewCtx.lineTo(bone.x2, bone.y2)
-    previewCtx.stroke()
+    const isSelected = state.rig.selectedBoneId === bone.id
+    const color = state.rig.boneColors[bone.id] || '#4ecdc4'
 
-    // Circles at joints - much larger and more visible
-    previewCtx.fillStyle = color
-    previewCtx.beginPath()
-    previewCtx.arc(bone.x1, bone.y1, 0.6, 0, Math.PI * 2)
-    previewCtx.fill()
-    previewCtx.beginPath()
-    previewCtx.arc(bone.x2, bone.y2, 0.6, 0, Math.PI * 2)
-    previewCtx.fill()
+    // Convert to display coords (center of pixel)
+    const p1 = pixelToDisplay(bone.x1 + 0.5, bone.y1 + 0.5)
+    const p2 = pixelToDisplay(bone.x2 + 0.5, bone.y2 + 0.5)
 
-    // White outline for better visibility
-    previewCtx.strokeStyle = '#FFFFFF'
-    previewCtx.lineWidth = 0.2
-    previewCtx.beginPath()
-    previewCtx.arc(bone.x1, bone.y1, 0.6, 0, Math.PI * 2)
-    previewCtx.stroke()
-    previewCtx.beginPath()
-    previewCtx.arc(bone.x2, bone.y2, 0.6, 0, Math.PI * 2)
-    previewCtx.stroke()
+    // Draw bone line - outer glow for selected
+    if (isSelected) {
+      rigCtx.strokeStyle = '#ffffff'
+      rigCtx.lineWidth = lineWidth + 4
+      rigCtx.beginPath()
+      rigCtx.moveTo(p1.x, p1.y)
+      rigCtx.lineTo(p2.x, p2.y)
+      rigCtx.stroke()
+    }
+
+    // Draw bone line
+    rigCtx.strokeStyle = color
+    rigCtx.lineWidth = lineWidth
+    rigCtx.lineCap = 'round'
+    rigCtx.beginPath()
+    rigCtx.moveTo(p1.x, p1.y)
+    rigCtx.lineTo(p2.x, p2.y)
+    rigCtx.stroke()
+
+    // Draw direction arrow (small triangle at 2/3 along bone)
+    const mx = p1.x + (p2.x - p1.x) * 0.65
+    const my = p1.y + (p2.y - p1.y) * 0.65
+    const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x)
+    const arrowSize = jointRadius * 0.6
+    rigCtx.fillStyle = color
+    rigCtx.beginPath()
+    rigCtx.moveTo(mx + Math.cos(angle) * arrowSize, my + Math.sin(angle) * arrowSize)
+    rigCtx.lineTo(mx + Math.cos(angle + 2.5) * arrowSize, my + Math.sin(angle + 2.5) * arrowSize)
+    rigCtx.lineTo(mx + Math.cos(angle - 2.5) * arrowSize, my + Math.sin(angle - 2.5) * arrowSize)
+    rigCtx.closePath()
+    rigCtx.fill()
+
+    // Draw joints (circles at endpoints)
+    // Start joint
+    rigCtx.fillStyle = isSelected ? '#ffffff' : color
+    rigCtx.strokeStyle = '#000000'
+    rigCtx.lineWidth = 1.5
+    rigCtx.beginPath()
+    rigCtx.arc(p1.x, p1.y, jointRadius, 0, Math.PI * 2)
+    rigCtx.fill()
+    rigCtx.stroke()
+
+    // End joint
+    rigCtx.fillStyle = isSelected ? '#ffffff' : color
+    rigCtx.beginPath()
+    rigCtx.arc(p2.x, p2.y, jointRadius * 0.7, 0, Math.PI * 2)
+    rigCtx.fill()
+    rigCtx.stroke()
+
+    // Draw bone name near midpoint
+    const labelX = (p1.x + p2.x) / 2
+    const labelY = (p1.y + p2.y) / 2 - jointRadius - 4
+    rigCtx.font = `${Math.max(10, cellW * 0.3)}px Inter, sans-serif`
+    rigCtx.fillStyle = '#ffffff'
+    rigCtx.strokeStyle = '#000000'
+    rigCtx.lineWidth = 2
+    rigCtx.textAlign = 'center'
+    rigCtx.strokeText(bone.name, labelX, labelY)
+    rigCtx.fillText(bone.name, labelX, labelY)
   })
 }
 
 function renderRigPreview(start, end) {
   renderRigVisualization()
-  if (start) {
-    previewCtx.strokeStyle = '#FFFFFF'
-    previewCtx.lineWidth = 1.2
-    previewCtx.beginPath()
-    previewCtx.moveTo(start.x, start.y)
-    previewCtx.lineTo(end.x, end.y)
-    previewCtx.stroke()
+  if (start && end) {
+    const p1 = pixelToDisplay(start.x + 0.5, start.y + 0.5)
+    const p2 = pixelToDisplay(end.x + 0.5, end.y + 0.5)
+    const dw = rigOverlay.width
+    const cellW = dw / totalW()
+    const lineWidth = Math.max(2, cellW * 0.15)
 
-    // Draw inner yellow line for better visibility
-    previewCtx.strokeStyle = '#FFFF00'
-    previewCtx.lineWidth = 0.6
-    previewCtx.beginPath()
-    previewCtx.moveTo(start.x, start.y)
-    previewCtx.lineTo(end.x, end.y)
-    previewCtx.stroke()
+    // White outer
+    rigCtx.strokeStyle = '#ffffff'
+    rigCtx.lineWidth = lineWidth + 2
+    rigCtx.lineCap = 'round'
+    rigCtx.beginPath()
+    rigCtx.moveTo(p1.x, p1.y)
+    rigCtx.lineTo(p2.x, p2.y)
+    rigCtx.stroke()
+
+    // Yellow inner
+    rigCtx.strokeStyle = '#FFFF00'
+    rigCtx.lineWidth = lineWidth
+    rigCtx.beginPath()
+    rigCtx.moveTo(p1.x, p1.y)
+    rigCtx.lineTo(p2.x, p2.y)
+    rigCtx.stroke()
+
+    // Joint indicators
+    const jointRadius = Math.max(4, cellW * 0.35)
+    rigCtx.fillStyle = '#FFFF00'
+    rigCtx.strokeStyle = '#000000'
+    rigCtx.lineWidth = 1.5
+    rigCtx.beginPath()
+    rigCtx.arc(p1.x, p1.y, jointRadius, 0, Math.PI * 2)
+    rigCtx.fill()
+    rigCtx.stroke()
+    rigCtx.beginPath()
+    rigCtx.arc(p2.x, p2.y, jointRadius * 0.7, 0, Math.PI * 2)
+    rigCtx.fill()
+    rigCtx.stroke()
   }
 }
 
 function getRandomBoneColor() {
-  const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#ffa502', '#a78bfa']
+  const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#ffa502', '#a78bfa', '#f472b6', '#34d399', '#fbbf24']
   return colors[Math.floor(Math.random() * colors.length)]
 }
 
@@ -2532,16 +4132,62 @@ function updateRigPanel() {
     const item = document.createElement('div')
     item.style.padding = '6px'
     item.style.marginBottom = '4px'
-    item.style.background = state.rig.boneColors[bone.id] + '33'
-    item.style.border = '1px solid ' + state.rig.boneColors[bone.id]
+    item.style.background = state.rig.selectedBoneId === bone.id
+      ? state.rig.boneColors[bone.id] + '66'
+      : state.rig.boneColors[bone.id] + '33'
+    item.style.border = state.rig.selectedBoneId === bone.id
+      ? '2px solid ' + state.rig.boneColors[bone.id]
+      : '1px solid ' + state.rig.boneColors[bone.id]
     item.style.borderRadius = '4px'
     item.style.cursor = 'pointer'
-    item.textContent = bone.name
+    item.style.fontSize = '12px'
+    item.style.display = 'flex'
+    item.style.alignItems = 'center'
+    item.style.justifyContent = 'space-between'
+
+    const nameSpan = document.createElement('span')
+    nameSpan.textContent = bone.name
+    nameSpan.style.flex = '1'
+    item.appendChild(nameSpan)
+
+    const deleteBtn = document.createElement('button')
+    deleteBtn.innerHTML = '&#x2715;'
+    deleteBtn.title = 'Eliminar hueso'
+    deleteBtn.style.cssText = 'background:none;border:none;color:var(--danger,#ff6b6b);cursor:pointer;font-size:14px;padding:0 4px;line-height:1;font-weight:bold;'
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      state.rig.bones.splice(idx, 1)
+      // Reassign IDs
+      state.rig.bones.forEach((b, i) => { b.id = i })
+      const newColors = {}
+      state.rig.bones.forEach((b) => {
+        newColors[b.id] = state.rig.boneColors[b.id] || getRandomBoneColor()
+      })
+      state.rig.boneColors = newColors
+      if (state.rig.selectedBoneId === bone.id) state.rig.selectedBoneId = null
+      updateRigPanel()
+      renderRigVisualization()
+    })
+    item.appendChild(deleteBtn)
+
     item.addEventListener('click', () => {
-      state.rig.selectedBoneId = idx
+      state.rig.selectedBoneId = bone.id
+      updateRigPanel()
+      renderRigVisualization()
     })
     bonesList.appendChild(item)
   })
+
+  // Update weight info display
+  const rigWeightInfo = $('#rigWeightInfo')
+  if (rigWeightInfo) {
+    const totalWeights = Object.keys(state.rig.boneWeights).length
+    if (totalWeights > 0) {
+      rigWeightInfo.textContent = `Pesos asignados: ${totalWeights} p�xeles`
+    } else {
+      rigWeightInfo.textContent = 'Sin pesos asignados. Usa "Auto-asignar" o pinta en modo Influencia.'
+    }
+  }
 }
 
 // ==========================================
@@ -2571,19 +4217,18 @@ function startAnimation() {
     animPreviewCtx.clearRect(0, 0, state.width, state.height)
 
     const frameLayers = state.frames[frameIdx]
-    for (let i = frameLayers.length - 1; i >= 0; i--) {
-      if (!frameLayers[i].visible) continue
-      animPreviewCtx.globalAlpha = frameLayers[i].opacity
-      animPreviewCtx.drawImage(frameLayers[i].canvas, 0, 0)
+    const flatAnimLayers = getFlatLayers(frameLayers)
+    for (let i = flatAnimLayers.length - 1; i >= 0; i--) {
+      animPreviewCtx.globalAlpha = flatAnimLayers[i].opacity
+      animPreviewCtx.drawImage(flatAnimLayers[i].canvas, -OVERFLOW_MARGIN, -OVERFLOW_MARGIN)
     }
     animPreviewCtx.globalAlpha = 1
 
     // Also update main canvas
-    ctx.clearRect(0, 0, state.width, state.height)
-    for (let i = frameLayers.length - 1; i >= 0; i--) {
-      if (!frameLayers[i].visible) continue
-      ctx.globalAlpha = frameLayers[i].opacity
-      ctx.drawImage(frameLayers[i].canvas, 0, 0)
+    ctx.clearRect(0, 0, totalW(), totalH())
+    for (let i = flatAnimLayers.length - 1; i >= 0; i--) {
+      ctx.globalAlpha = flatAnimLayers[i].opacity
+      ctx.drawImage(flatAnimLayers[i].canvas, 0, 0)
     }
     ctx.globalAlpha = 1
 
@@ -2620,26 +4265,14 @@ function resizeAllCanvases(newW, newH) {
 
   // Resize all frames and layers
   state.frames.forEach((frameLayers) => {
-    frameLayers.forEach((layer) => {
-      const tempCanvas = document.createElement('canvas')
-      tempCanvas.width = oldW
-      tempCanvas.height = oldH
-      tempCanvas.getContext('2d', { alpha: false }).drawImage(layer.canvas, 0, 0)
-
-      layer.canvas.width = newW
-      layer.canvas.height = newH
-      layer.ctx = layer.canvas.getContext('2d', { alpha: false })
-      layer.ctx.imageSmoothingEnabled = false
-      layer.ctx.drawImage(tempCanvas, 0, 0)
-    })
+    resizeTreeCanvases(frameLayers, oldW, oldH, newW, newH)
   })
 
-  canvas.width = newW
-  canvas.height = newH
-  gridOverlay.width = newW
-  gridOverlay.height = newH
-  previewOverlay.width = newW
-  previewOverlay.height = newH
+  canvas.width = totalW()
+  canvas.height = totalH()
+  // Grid overlay size is set in recalcCanvasSize at display resolution
+  previewOverlay.width = totalW()
+  previewOverlay.height = totalH()
 
   updateCanvasDisplay()
   renderFramesList()
@@ -2655,27 +4288,40 @@ function resizeAllCanvases(newW, newH) {
 function openProjectFile() {
   const input = document.createElement('input')
   input.type = 'file'
-  input.accept = 'image/png, image/jpeg'
+  input.accept = '.anima,application/json,image/png,image/jpeg'
   input.onchange = (e) => {
     const file = e.target.files[0]
     if (!file) return
 
-    const reader = new FileReader()
-    reader.onload = (event) => {
-      const img = new Image()
-      img.onload = () => {
-        // Create project from image
-        createNewProject(file.name, img.width, img.height)
-        // Draw image onto the initial layer
-        const layer = state.layers[0]
-        layer.ctx.drawImage(img, 0, 0)
-        compositeAndDisplay()
-        renderLayersList()
-        renderFramesList()
+    const isAnima = file.name.toLowerCase().endsWith('.anima') || file.type === 'application/json'
+    if (isAnima) {
+      file.text().then((txt) => {
+        try {
+          const data = JSON.parse(txt)
+          importAnimaData(data, file.name)
+        } catch (err) {
+          console.error('Error al cargar .anima', err)
+        }
+      })
+    } else {
+      const reader = new FileReader()
+      reader.onload = (event) => {
+        const img = new Image()
+        img.onload = () => {
+          // Create project from image
+          createNewProject(file.name, img.width, img.height)
+          // Draw image onto the initial layer at the project origin
+          const allLayers = getAllLayers(state.layers)
+          const layer = allLayers[0]
+          layer.ctx.drawImage(img, OVERFLOW_MARGIN, OVERFLOW_MARGIN)
+          compositeAndDisplay()
+          renderLayersList()
+          renderFramesList()
+        }
+        img.src = event.target.result
       }
-      img.src = event.target.result
+      reader.readAsDataURL(file)
     }
-    reader.readAsDataURL(file)
   }
   input.click()
 }
@@ -2699,6 +4345,182 @@ function hideSaveAsDialog() {
 }
 
 // ==========================================
+// PROJECT EXPORT/IMPORT (.anima)
+// ==========================================
+function serializeLayerTreeForExport(items) {
+  return items.map(item => {
+    if (item.type === 'folder') {
+      return {
+        id: item.id,
+        type: 'folder',
+        name: item.name,
+        children: serializeLayerTreeForExport(item.children),
+        visible: item.visible,
+        opacity: item.opacity,
+        expanded: item.expanded,
+      }
+    } else {
+      return {
+        id: item.id,
+        type: 'layer',
+        name: item.name,
+        visible: item.visible,
+        opacity: item.opacity,
+        png: item.canvas.toDataURL('image/png'),
+      }
+    }
+  })
+}
+
+function loadImageFromDataURL(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = reject
+    img.src = url
+  })
+}
+
+async function deserializeLayerTreeFromExport(items, width, height) {
+  const result = []
+  for (const s of items) {
+    if (s.type === 'folder') {
+      result.push({
+        id: s.id,
+        type: 'folder',
+        name: s.name,
+        children: await deserializeLayerTreeFromExport(s.children || [], width, height),
+        visible: s.visible ?? true,
+        opacity: s.opacity ?? 1,
+        expanded: s.expanded ?? true,
+      })
+    } else {
+      const layerCanvas = document.createElement('canvas')
+      layerCanvas.width = width + 2 * OVERFLOW_MARGIN
+      layerCanvas.height = height + 2 * OVERFLOW_MARGIN
+      const layerCtx = layerCanvas.getContext('2d')
+      layerCtx.imageSmoothingEnabled = false
+      if (s.png) {
+        try {
+          const img = await loadImageFromDataURL(s.png)
+          // If saved image already includes overflow (new format), draw at origin;
+          // otherwise (old format, project-size only) draw at OVERFLOW_MARGIN
+          if (img.width === width + 2 * OVERFLOW_MARGIN && img.height === height + 2 * OVERFLOW_MARGIN) {
+            layerCtx.drawImage(img, 0, 0)
+          } else {
+            layerCtx.drawImage(img, OVERFLOW_MARGIN, OVERFLOW_MARGIN)
+          }
+        } catch (err) {
+          console.error('Error cargando imagen de capa', err)
+        }
+      }
+      result.push({
+        id: s.id,
+        type: 'layer',
+        name: s.name,
+        canvas: layerCanvas,
+        ctx: layerCtx,
+        visible: s.visible ?? true,
+        opacity: s.opacity ?? 1,
+      })
+    }
+  }
+  return result
+}
+
+function exportAnima(forcePrompt = false) {
+  if (!state) return
+
+  let targetName = state.fileName || `${state.name || 'proyecto'}.anima`
+  if (forcePrompt || !state.fileName) {
+    const suggested = targetName.endsWith('.anima') ? targetName : `${targetName}.anima`
+    const newName = window.prompt('Nombre de archivo (.anima):', suggested)
+    if (!newName) return
+    targetName = newName.toLowerCase().endsWith('.anima') ? newName : `${newName}.anima`
+    state.fileName = targetName
+  }
+
+  const payload = {
+    version: 1,
+    name: state.name,
+    width: state.width,
+    height: state.height,
+    fps: state.fps,
+    showGrid: state.showGrid,
+    onionSkin: state.onionSkin,
+    currentColor: state.currentColor,
+    secondaryColor: state.secondaryColor,
+    userPalette: drawingState.userPalette,
+    currentFrameIndex: state.currentFrameIndex,
+    activeLayerId: state.activeLayerId,
+    frames: state.frames.map(f => serializeLayerTreeForExport(f)),
+    rig: {
+      bones: state.rig.bones,
+      boneColors: state.rig.boneColors,
+      boneWeights: state.rig.boneWeights,
+    }
+  }
+
+  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = targetName
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+async function importAnimaData(data, fileName = null) {
+  if (!data || !data.frames) return
+  const width = data.width || 16
+  const height = data.height || 16
+  createNewProject(data.name || 'Proyecto', width, height)
+
+  state.fileName = fileName && fileName.toLowerCase().endsWith('.anima') ? fileName : null
+
+  state.fps = data.fps ?? state.fps
+  state.showGrid = data.showGrid ?? true
+  state.onionSkin = data.onionSkin ?? false
+  state.currentColor = data.currentColor || state.currentColor
+  state.secondaryColor = data.secondaryColor || state.secondaryColor
+  drawingState.userPalette = data.userPalette || []
+
+  $('#toggleGrid').classList.toggle('active', state.showGrid)
+  $('#toggleOnionSkin').classList.toggle('active', state.onionSkin)
+  if (data.currentColor) setCurrentColor(data.currentColor)
+  const secondaryColorSwatch = $('#secondaryColorSwatch')
+  const secondaryColorHexLabel = $('#secondaryColorHexLabel')
+  if (secondaryColorSwatch && secondaryColorHexLabel && data.secondaryColor) {
+    secondaryColorSwatch.style.backgroundColor = data.secondaryColor
+    secondaryColorHexLabel.textContent = data.secondaryColor.toUpperCase()
+  }
+
+  const frames = []
+  for (const frame of data.frames) {
+    frames.push(await deserializeLayerTreeFromExport(frame, width, height))
+  }
+  state.frames = frames.length > 0 ? frames : [state.layers]
+  state.currentFrameIndex = Math.min(data.currentFrameIndex || 0, state.frames.length - 1)
+  state.layers = state.frames[state.currentFrameIndex]
+  state.activeLayerId = data.activeLayerId || (getAllLayers(state.layers)[0]?.id || null)
+
+  if (data.rig) {
+    state.rig.bones = data.rig.bones || []
+    state.rig.boneColors = data.rig.boneColors || {}
+    state.rig.boneWeights = data.rig.boneWeights || {}
+    state.rig.selectedBoneId = null
+    state.rig.originalBones = null
+    state.rig.originalPixels = null
+  }
+
+  renderUserPalette()
+  renderLayersList()
+  renderFramesList()
+  compositeAndDisplay()
+  drawGrid()
+}
+
+// ==========================================
 // EXPORT
 // ==========================================
 function exportPNG() {
@@ -2707,12 +4529,12 @@ function exportPNG() {
   const exportCanvas = document.createElement('canvas')
   exportCanvas.width = state.width
   exportCanvas.height = state.height
-  const ectx = exportCanvas.getContext('2d', { alpha: false })
+  const ectx = exportCanvas.getContext('2d')
 
-  for (let i = state.layers.length - 1; i >= 0; i--) {
-    if (!state.layers[i].visible) continue
-    ectx.globalAlpha = state.layers[i].opacity
-    ectx.drawImage(state.layers[i].canvas, 0, 0)
+  const flatExportLayers = getFlatLayers(state.layers)
+  for (let i = flatExportLayers.length - 1; i >= 0; i--) {
+    ectx.globalAlpha = flatExportLayers[i].opacity
+    ectx.drawImage(flatExportLayers[i].canvas, -OVERFLOW_MARGIN, -OVERFLOW_MARGIN)
   }
 
   const link = document.createElement('a')
@@ -2726,16 +4548,16 @@ function exportJPEG() {
   const exportCanvas = document.createElement('canvas')
   exportCanvas.width = state.width
   exportCanvas.height = state.height
-  const ectx = exportCanvas.getContext('2d', { alpha: false })
+  const ectx = exportCanvas.getContext('2d')
 
   // JPEG needs a background color (usually white)
   ectx.fillStyle = '#ffffff'
   ectx.fillRect(0, 0, state.width, state.height)
 
-  for (let i = state.layers.length - 1; i >= 0; i--) {
-    if (!state.layers[i].visible) continue
-    ectx.globalAlpha = state.layers[i].opacity
-    ectx.drawImage(state.layers[i].canvas, 0, 0)
+  const flatJpegLayers = getFlatLayers(state.layers)
+  for (let i = flatJpegLayers.length - 1; i >= 0; i--) {
+    ectx.globalAlpha = flatJpegLayers[i].opacity
+    ectx.drawImage(flatJpegLayers[i].canvas, -OVERFLOW_MARGIN, -OVERFLOW_MARGIN)
   }
 
   const link = document.createElement('a')
@@ -2751,17 +4573,17 @@ function exportSpritesheet() {
   const sheetCanvas = document.createElement('canvas')
   sheetCanvas.width = state.width * cols
   sheetCanvas.height = state.height * rows
-  const sctx = sheetCanvas.getContext('2d', { alpha: false })
+  const sctx = sheetCanvas.getContext('2d')
   sctx.imageSmoothingEnabled = false
 
   state.frames.forEach((frameLayers, idx) => {
     const fx = (idx % cols) * state.width
     const fy = Math.floor(idx / cols) * state.height
 
-    for (let i = frameLayers.length - 1; i >= 0; i--) {
-      if (!frameLayers[i].visible) continue
-      sctx.globalAlpha = frameLayers[i].opacity
-      sctx.drawImage(frameLayers[i].canvas, fx, fy)
+    const flatSheetLayers = getFlatLayers(frameLayers)
+    for (let i = flatSheetLayers.length - 1; i >= 0; i--) {
+      sctx.globalAlpha = flatSheetLayers[i].opacity
+      sctx.drawImage(flatSheetLayers[i].canvas, fx - OVERFLOW_MARGIN, fy - OVERFLOW_MARGIN)
     }
     sctx.globalAlpha = 1
   })
