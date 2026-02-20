@@ -208,7 +208,8 @@ const drawingState = {
   marchingAntsOffset: 0,
   marchingAntsInterval: null,
   // Magic Wand tool
-  wandTolerance: 50,
+  wandTolerance: 32,       // 0-255: distancia de color RGB máxima para incluir píxeles
+  wandContiguous: true,     // true = Flood Fill contiguo, false = búsqueda global
   brushSize: 1,  // 1-500px for pencil and eraser
   // Selection dragging
   dragSelection: false,
@@ -313,8 +314,8 @@ function recalcCanvasSize() {
   const availableW = containerRect.width - 64
   const availableH = containerRect.height - 64
   
-  // Base pixel size that fits in the container
-  let pixelSize = Math.floor(Math.min(availableW / tW, availableH / tH))
+  // Base pixel size that fits in the container (based on project size, not total)
+  let pixelSize = Math.floor(Math.min(availableW / state.width, availableH / state.height))
   if (pixelSize < 1) pixelSize = 1 
   
   // Effective scale must be an integer so every canvas pixel maps to
@@ -324,29 +325,46 @@ function recalcCanvasSize() {
   
   drawingState.pixelSize = effectiveScale
   
-  const finalW = tW * effectiveScale
-  const finalH = tH * effectiveScale
+  // Full internal canvas size (includes overflow)
+  const fullW = tW * effectiveScale
+  const fullH = tH * effectiveScale
+  // Visible project area size (what the user sees)
+  const projW = state.width * effectiveScale
+  const projH = state.height * effectiveScale
+  // Offset to hide the overflow margin
+  const offsetPx = OVERFLOW_MARGIN * effectiveScale
 
-  canvasWrapper.style.width = finalW + 'px'
-  canvasWrapper.style.height = finalH + 'px'
+  // Wrapper clips to project area only
+  canvasWrapper.style.width = projW + 'px'
+  canvasWrapper.style.height = projH + 'px'
+  canvasWrapper.style.overflow = 'hidden'
 
-  canvas.style.width = finalW + 'px'
-  canvas.style.height = finalH + 'px'
+  // Internal canvases are full size but shifted so project area aligns with wrapper
+  canvas.style.width = fullW + 'px'
+  canvas.style.height = fullH + 'px'
+  canvas.style.marginLeft = -offsetPx + 'px'
+  canvas.style.marginTop = -offsetPx + 'px'
 
   // Grid overlay at display resolution for crisp 1px lines
-  gridOverlay.width = finalW
-  gridOverlay.height = finalH
-  gridOverlay.style.width = finalW + 'px'
-  gridOverlay.style.height = finalH + 'px'
+  gridOverlay.width = fullW
+  gridOverlay.height = fullH
+  gridOverlay.style.width = fullW + 'px'
+  gridOverlay.style.height = fullH + 'px'
+  gridOverlay.style.marginLeft = -offsetPx + 'px'
+  gridOverlay.style.marginTop = -offsetPx + 'px'
 
   // Rig overlay at display resolution for visible bones
-  rigOverlay.width = finalW
-  rigOverlay.height = finalH
-  rigOverlay.style.width = finalW + 'px'
-  rigOverlay.style.height = finalH + 'px'
+  rigOverlay.width = fullW
+  rigOverlay.height = fullH
+  rigOverlay.style.width = fullW + 'px'
+  rigOverlay.style.height = fullH + 'px'
+  rigOverlay.style.marginLeft = -offsetPx + 'px'
+  rigOverlay.style.marginTop = -offsetPx + 'px'
 
-  previewOverlay.style.width = finalW + 'px'
-  previewOverlay.style.height = finalH + 'px'
+  previewOverlay.style.width = fullW + 'px'
+  previewOverlay.style.height = fullH + 'px'
+  previewOverlay.style.marginLeft = -offsetPx + 'px'
+  previewOverlay.style.marginTop = -offsetPx + 'px'
 
   drawGrid()
 
@@ -1040,10 +1058,6 @@ function _renderFolderItem(folder, container, depth) {
   const nameEl = document.createElement('div')
   nameEl.className = 'layer-name'
   nameEl.textContent = folder.name
-  nameEl.addEventListener('dblclick', (e) => {
-    e.stopPropagation()
-    _startRename(folder, nameEl)
-  })
 
   // Visibility toggle
   const visBtn = _createVisibilityButton(folder)
@@ -1052,6 +1066,11 @@ function _renderFolderItem(folder, container, depth) {
   row.appendChild(folderIcon)
   row.appendChild(nameEl)
   row.appendChild(visBtn)
+
+  row.addEventListener('dblclick', (e) => {
+    e.stopPropagation()
+    _startRename(folder, row.querySelector('.layer-name'))
+  })
 
   row.addEventListener('click', (e) => {
     if (e.altKey) {
@@ -1074,6 +1093,7 @@ function _renderFolderItem(folder, container, depth) {
       }
       renderLayersList()
     } else {
+      if (state.activeLayerId === folder.id) return // already active, don't re-render
       setActiveLayer(folder.id)
     }
   })
@@ -1115,10 +1135,6 @@ function _renderLayerItem(layer, container, depth) {
   const nameEl = document.createElement('div')
   nameEl.className = 'layer-name'
   nameEl.textContent = layer.name
-  nameEl.addEventListener('dblclick', (e) => {
-    e.stopPropagation()
-    _startRename(layer, nameEl)
-  })
 
   // Visibility toggle
   const visBtn = _createVisibilityButton(layer)
@@ -1126,6 +1142,11 @@ function _renderLayerItem(layer, container, depth) {
   row.appendChild(thumb)
   row.appendChild(nameEl)
   row.appendChild(visBtn)
+
+  row.addEventListener('dblclick', (e) => {
+    e.stopPropagation()
+    _startRename(layer, row.querySelector('.layer-name'))
+  })
 
   row.addEventListener('click', (e) => {
     if (e.altKey) {
@@ -1153,6 +1174,7 @@ function _renderLayerItem(layer, container, depth) {
       }
       renderLayersList()
     } else {
+      if (state.activeLayerId === layer.id) return // already active, don't re-render
       setActiveLayer(layer.id)
     }
   })
@@ -1498,27 +1520,6 @@ function drawGrid() {
   const cellW = displayW / tW
   const cellH = displayH / tH
 
-  // Draw dim overflow area
-  const projLeft = Math.round(OVERFLOW_MARGIN * cellW)
-  const projTop = Math.round(OVERFLOW_MARGIN * cellH)
-  const projW = Math.round(state.width * cellW)
-  const projH = Math.round(state.height * cellH)
-
-  gridCtx.fillStyle = 'rgba(0, 0, 0, 0.25)'
-  // Top
-  gridCtx.fillRect(0, 0, displayW, projTop)
-  // Bottom
-  gridCtx.fillRect(0, projTop + projH, displayW, displayH - projTop - projH)
-  // Left
-  gridCtx.fillRect(0, projTop, projLeft, projH)
-  // Right
-  gridCtx.fillRect(projLeft + projW, projTop, displayW - projLeft - projW, projH)
-
-  // Project boundary border
-  gridCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)'
-  gridCtx.lineWidth = 2
-  gridCtx.strokeRect(projLeft, projTop, projW, projH)
-
   if (state.showGrid) {
     // Only show grid when pixels are large enough to distinguish
     if (cellW >= 4 && cellH >= 4) {
@@ -1809,61 +1810,159 @@ function updateSelectionRectFromPixels() {
   $('#btnCopySelection').style.display = 'block'
 }
 
+// ============================================================
+// selectByColor – Varita Mágica (Magic Wand)
+// ============================================================
+// Selecciona píxeles cuyo color RGB está dentro de la tolerancia
+// respecto al píxel clickeado (x, y).
+//
+// Modos:
+//   • Contiguo  → Flood Fill con stack (solo vecinos conectados)
+//   • No Contiguo → Recorrido lineal de toda la imagen
+//
+// Tolerancia: distancia euclídea en el espacio RGB
+//   d = sqrt((r1-r2)² + (g1-g2)² + (b1-b2)²)
+//   Rango útil: 0 (color exacto) – 441 (máximo teórico)
+//   El slider va de 0 a 255 que cubre la mayoría de casos.
+// ============================================================
 function selectByColor(x, y, layerCtx) {
-  const pixelData = layerCtx.getImageData(x, y, 1, 1).data
-  const targetColor = { r: pixelData[0], g: pixelData[1], b: pixelData[2], a: pixelData[3] }
-  const tolerance = (drawingState.wandTolerance / 100) * 255
-
   const tW = totalW()
   const tH = totalH()
-  const imageData = layerCtx.getImageData(0, 0, tW, tH)
-  const data = imageData.data
 
-  // Collect matching pixels (without modifying selection yet)
+  // 1) Obtener TODOS los datos de imagen de una sola vez (rendimiento)
+  const imageData = layerCtx.getImageData(0, 0, tW, tH)
+  const data = imageData.data  // Uint8ClampedArray [R,G,B,A, R,G,B,A, …]
+
+  // 2) Color del píxel semilla (el que clickeó el usuario)
+  const seedIdx = (y * tW + x) * 4
+  const seedR = data[seedIdx]
+  const seedG = data[seedIdx + 1]
+  const seedB = data[seedIdx + 2]
+  const seedA = data[seedIdx + 3]
+
+  // 3) Tolerancia directa (0-255)
+  const tolerance = drawingState.wandTolerance
+
+  // Función auxiliar: calcula si un píxel (por su índice en data[]) coincide
+  // con el color semilla dentro de la tolerancia.
+  // Compara también el canal alfa para manejar píxeles transparentes.
+  function colorMatches(idx) {
+    const r = data[idx]
+    const g = data[idx + 1]
+    const b = data[idx + 2]
+    const a = data[idx + 3]
+
+    // Si el píxel semilla es totalmente transparente, solo coinciden
+    // otros píxeles totalmente transparentes (independiente de la tolerancia)
+    if (seedA === 0) return a === 0
+
+    // Si el píxel candidato es totalmente transparente pero el semilla no,
+    // no coincide (a menos que la tolerancia cubra la diferencia de alfa)
+    if (a === 0 && seedA > 0) {
+      // Incluimos transparentes solo si la tolerancia de alfa los cubre
+      const alphaDiff = seedA  // distancia al 0
+      if (alphaDiff > tolerance) return false
+    }
+
+    // Distancia euclídea en espacio RGB:
+    // d = sqrt( (r1-r2)² + (g1-g2)² + (b1-b2)² )
+    const dr = r - seedR
+    const dg = g - seedG
+    const db = b - seedB
+    const distance = Math.sqrt(dr * dr + dg * dg + db * db)
+
+    return distance <= tolerance
+  }
+
+  // 4) Recopilar los píxeles nuevos que coinciden
   const newPixels = new Set()
 
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i]
-    const g = data[i + 1]
-    const b = data[i + 2]
-    const a = data[i + 3]
+  if (drawingState.wandContiguous) {
+    // ───────────────────────────────────────────────
+    // MODO CONTIGUO: Flood Fill basado en stack
+    // ───────────────────────────────────────────────
+    // Recorre los 4-vecinos a partir del píxel semilla.
+    // Solo avanza a un vecino si su color coincide con el semilla
+    // dentro de la tolerancia. Esto produce una selección "conectada".
+    //
+    // Usamos un stack explícito (array) en lugar de recursión
+    // para evitar desbordamientos de pila en áreas grandes.
+    // Se usa un Set de visitados indexado por posición lineal (y*tW+x)
+    // para máximo rendimiento.
 
-    const distance = Math.sqrt(
-      (r - targetColor.r) ** 2 +
-      (g - targetColor.g) ** 2 +
-      (b - targetColor.b) ** 2
-    )
+    const visited = new Set()     // Índice lineal → ya procesado
+    const stack = [y * tW + x]    // Semilla en formato lineal
+    visited.add(stack[0])
 
-    if (a > 0 && distance <= tolerance) {
-      const pixelIndex = i / 4
-      const px = pixelIndex % tW
-      const py = Math.floor(pixelIndex / tW)
+    while (stack.length > 0) {
+      const pos = stack.pop()     // Posición lineal actual
+      const idx = pos * 4         // Índice en data[]
+
+      if (!colorMatches(idx)) continue
+
+      // Este píxel coincide → añadir a la selección
+      const px = pos % tW
+      const py = (pos - px) / tW
       newPixels.add(px + ',' + py)
+
+      // Explorar los 4 vecinos (arriba, abajo, izquierda, derecha)
+      const neighbors = []
+      if (px > 0)      neighbors.push(pos - 1)       // izquierda
+      if (px < tW - 1) neighbors.push(pos + 1)       // derecha
+      if (py > 0)      neighbors.push(pos - tW)      // arriba
+      if (py < tH - 1) neighbors.push(pos + tW)      // abajo
+
+      for (const nPos of neighbors) {
+        if (!visited.has(nPos)) {
+          visited.add(nPos)
+          stack.push(nPos)
+        }
+      }
+    }
+  } else {
+    // ───────────────────────────────────────────────
+    // MODO NO CONTIGUO: recorrido global de la imagen
+    // ───────────────────────────────────────────────
+    // Recorre TODOS los píxeles de la imagen y selecciona cada uno
+    // que esté dentro de la tolerancia respecto al color semilla.
+    // No importa si están conectados o no al punto de origen.
+
+    for (let i = 0; i < data.length; i += 4) {
+      if (colorMatches(i)) {
+        const pixelIndex = i / 4
+        const px = pixelIndex % tW
+        const py = (pixelIndex - px) / tW
+        newPixels.add(px + ',' + py)
+      }
     }
   }
 
-  // Apply selection modes
+  // 5) Aplicar modos de selección (reemplazar / agregar / substraer)
+  //    Esto permite que la varita respete Ctrl+Shift (agregar) y
+  //    Ctrl+Alt (substraer) como las herramientas de selección profesionales.
   switch (drawingState.selectionMode) {
     case 'replace':
       drawingState.selectedPixels.clear()
-      // Fall through to add logic
+      // Fall through → agrega los nuevos píxeles
 
     case 'add':
-      // Union: add new pixels to existing selection
+      // Unión: agregar píxeles nuevos a la selección existente
       newPixels.forEach((pixel) => {
         drawingState.selectedPixels.add(pixel)
       })
       break
 
     case 'subtract':
-      // Difference: remove new pixels from existing selection
+      // Diferencia: remover píxeles del set existente
       newPixels.forEach((pixel) => {
         drawingState.selectedPixels.delete(pixel)
       })
       break
   }
 
+  // 6) Actualizar bounding rect y feedback visual
   updateSelectionRectFromPixels()
+  drawWandSelectionOverlay()   // superponer máscara visual roja
   startMarchingAntsAnimation()
 }
 
@@ -1880,7 +1979,20 @@ function copySelectionToClipboard() {
   drawingState.clipboardCanvas.width = rect.w
   drawingState.clipboardCanvas.height = rect.h
   const clipCtx = drawingState.clipboardCanvas.getContext('2d')
-  clipCtx.drawImage(layer.canvas, -rect.x, -rect.y)
+  clipCtx.imageSmoothingEnabled = false
+
+  // Copy only the selected pixels, not the entire rect
+  const imgData = layer.ctx.getImageData(rect.x, rect.y, rect.w, rect.h)
+  const d = imgData.data
+  for (let i = 0; i < d.length; i += 4) {
+    const pi = i / 4
+    const px = rect.x + (pi % rect.w)
+    const py = rect.y + Math.floor(pi / rect.w)
+    if (!drawingState.selectedPixels.has(px + ',' + py)) {
+      d[i + 3] = 0 // make non-selected pixels transparent
+    }
+  }
+  clipCtx.putImageData(imgData, 0, 0)
 
   drawingState.pasteStartX = rect.x
   drawingState.pasteStartY = rect.y
@@ -1897,7 +2009,12 @@ function startMarchingAntsAnimation() {
     drawingState.marchingAntsOffset = (drawingState.marchingAntsOffset + 1) % 8
     previewCtx.clearRect(0, 0, totalW(), totalH())
 
-    if (drawingState.selectRect) {
+    if (drawingState.selectedPixels.size > 0) {
+      // Redraw visual feedback overlay (red semi-transparent mask)
+      if (state.currentTool === 'wand') drawWandSelectionOverlay()
+      // Always prefer pixel-based outline when we have selectedPixels
+      drawMarchingAntsFromPixels(previewCtx)
+    } else if (drawingState.selectRect) {
       drawMarchingAntsRect(
         drawingState.selectRect.x,
         drawingState.selectRect.y,
@@ -1905,8 +2022,6 @@ function startMarchingAntsAnimation() {
         drawingState.selectRect.h,
         previewCtx
       )
-    } else if (drawingState.selectedPixels.size > 0) {
-      drawMarchingAntsFromPixels(previewCtx)
     }
   }, 50)
 }
@@ -1920,23 +2035,36 @@ function drawMarchingAntsRect(x, y, w, h, ctx) {
   ctx.setLineDash([])
 }
 
-function drawMarchingAntsFromPixels(ctx) {
+function drawMarchingAntsFromPixels(ctx, offsetX = 0, offsetY = 0) {
   if (drawingState.selectedPixels.size === 0) return
 
-  // Compute bounding box
-  let minX = Infinity, maxX = -Infinity
-  let minY = Infinity, maxY = -Infinity
+  // Draw marching ants along the outline of the actual pixel shape
+  ctx.strokeStyle = '#FFFF00'
+  ctx.lineWidth = 1
+  ctx.setLineDash([1, 1])
+  ctx.lineDashOffset = -drawingState.marchingAntsOffset * 0.1
 
+  ctx.beginPath()
   drawingState.selectedPixels.forEach((key) => {
     const [px, py] = key.split(',').map(Number)
-    minX = Math.min(minX, px)
-    maxX = Math.max(maxX, px)
-    minY = Math.min(minY, py)
-    maxY = Math.max(maxY, py)
+    const dx = px + offsetX
+    const dy = py + offsetY
+    // Draw edges that border non-selected pixels
+    if (!drawingState.selectedPixels.has((px - 1) + ',' + py)) {
+      ctx.moveTo(dx, dy); ctx.lineTo(dx, dy + 1) // left
+    }
+    if (!drawingState.selectedPixels.has((px + 1) + ',' + py)) {
+      ctx.moveTo(dx + 1, dy); ctx.lineTo(dx + 1, dy + 1) // right
+    }
+    if (!drawingState.selectedPixels.has(px + ',' + (py - 1))) {
+      ctx.moveTo(dx, dy); ctx.lineTo(dx + 1, dy) // top
+    }
+    if (!drawingState.selectedPixels.has(px + ',' + (py + 1))) {
+      ctx.moveTo(dx, dy + 1); ctx.lineTo(dx + 1, dy + 1) // bottom
+    }
   })
-
-  // Draw rect marching ants
-  drawMarchingAntsRect(minX, minY, maxX - minX + 1, maxY - minY + 1, ctx)
+  ctx.stroke()
+  ctx.setLineDash([])
 }
 
 function stopMarchingAntsAnimation() {
@@ -1944,6 +2072,41 @@ function stopMarchingAntsAnimation() {
     clearInterval(drawingState.marchingAntsInterval)
     drawingState.marchingAntsInterval = null
   }
+}
+
+// ==========================================
+// WAND SELECTION VISUAL FEEDBACK
+// ==========================================
+// Pinta una máscara semitransparente roja sobre los píxeles
+// seleccionados para dar feedback visual inmediato al usuario.
+// Se dibuja en el previewOverlay para no alterar la imagen real.
+function drawWandSelectionOverlay() {
+  if (drawingState.selectedPixels.size === 0) return
+
+  const rect = drawingState.selectRect
+  if (!rect) return
+
+  // Crear un ImageData temporal del tamaño del bounding rect
+  const w = rect.w
+  const h = rect.h
+  const overlayData = previewCtx.createImageData(w, h)
+  const d = overlayData.data
+
+  // Pintar cada píxel seleccionado con rojo semitransparente (rgba 255,0,0,80)
+  drawingState.selectedPixels.forEach((key) => {
+    const [px, py] = key.split(',').map(Number)
+    const lx = px - rect.x
+    const ly = py - rect.y
+    if (lx >= 0 && lx < w && ly >= 0 && ly < h) {
+      const idx = (ly * w + lx) * 4
+      d[idx]     = 255  // R
+      d[idx + 1] = 0    // G
+      d[idx + 2] = 0    // B
+      d[idx + 3] = 80   // A (semitransparente)
+    }
+  })
+
+  previewCtx.putImageData(overlayData, rect.x, rect.y)
 }
 
 // ==========================================
@@ -2003,6 +2166,9 @@ function saveUndoState() {
   state.undoStack.push({
     layers: snapshot,
     activeLayerId: state.activeLayerId,
+    // Guardar estado de selección para que Ctrl+Z deshaga selecciones
+    selectedPixels: new Set(drawingState.selectedPixels),
+    selectRect: drawingState.selectRect ? { ...drawingState.selectRect } : null,
   })
 
   if (state.undoStack.length > state.maxUndoSteps) {
@@ -2020,6 +2186,8 @@ function undo() {
   state.redoStack.push({
     layers: currentSnapshot,
     activeLayerId: state.activeLayerId,
+    selectedPixels: new Set(drawingState.selectedPixels),
+    selectRect: drawingState.selectRect ? { ...drawingState.selectRect } : null,
   })
 
   const prev = state.undoStack.pop()
@@ -2033,6 +2201,8 @@ function redo() {
   state.undoStack.push({
     layers: currentSnapshot,
     activeLayerId: state.activeLayerId,
+    selectedPixels: new Set(drawingState.selectedPixels),
+    selectRect: drawingState.selectRect ? { ...drawingState.selectRect } : null,
   })
 
   const next = state.redoStack.pop()
@@ -2043,6 +2213,25 @@ function restoreFromSnapshot(snapshot) {
   state.layers = restoreTree(snapshot.layers)
   state.activeLayerId = snapshot.activeLayerId
   state.frames[state.currentFrameIndex] = state.layers
+
+  // Restaurar estado de selección
+  if (snapshot.selectedPixels) {
+    drawingState.selectedPixels = new Set(snapshot.selectedPixels)
+    drawingState.selectRect = snapshot.selectRect ? { ...snapshot.selectRect } : null
+  } else {
+    drawingState.selectedPixels.clear()
+    drawingState.selectRect = null
+  }
+
+  // Actualizar UI de selección
+  if (drawingState.selectedPixels.size > 0) {
+    startMarchingAntsAnimation()
+    $('#btnCopySelection').style.display = 'block'
+  } else {
+    stopMarchingAntsAnimation()
+    previewCtx.clearRect(0, 0, totalW(), totalH())
+    $('#btnCopySelection').style.display = 'none'
+  }
 
   renderLayersList()
   compositeAndDisplay()
@@ -2070,6 +2259,7 @@ function setupEventListeners() {
     e.preventDefault()
     // Right-click: deselect selection and wand tools
     if (state.currentTool === 'select' || state.currentTool === 'wand') {
+      if (drawingState.selectedPixels.size > 0) saveUndoState()
       drawingState.selectedPixels.clear()
       drawingState.selectRect = null
       stopMarchingAntsAnimation()
@@ -2215,7 +2405,7 @@ function setupEventListeners() {
     compositeAndDisplay()
   })
 
-  // === Magic Wand Tolerance ===
+  // === Magic Wand Tolerance & Contiguous ===
   const wandToleranceSlider = $('#wandTolerance')
   const wandToleranceValue = $('#wandToleranceValue')
   if (wandToleranceSlider && wandToleranceValue) {
@@ -2223,6 +2413,12 @@ function setupEventListeners() {
       const val = parseInt(e.target.value)
       drawingState.wandTolerance = val
       wandToleranceValue.textContent = val
+    })
+  }
+  const wandContiguousCheckbox = $('#wandContiguous')
+  if (wandContiguousCheckbox) {
+    wandContiguousCheckbox.addEventListener('change', (e) => {
+      drawingState.wandContiguous = e.target.checked
     })
   }
 
@@ -2433,8 +2629,10 @@ function setupEventListeners() {
       selectTool('wand')
     } else if (e.key === 't' || e.key === 'T') {
       selectTool('text')
-    } else if (e.key === 'z' || e.key === 'Z') {
+    } else if (e.key === 'z') {
       selectTool('zoom')
+    } else if (e.key === 'Z') {
+      selectTool('zoom-out')
     } else if (e.key === 'c' || e.key === 'C') {
       selectTool('circle')
     } else if (e.key === 'o' || e.key === 'O') {
@@ -2446,6 +2644,7 @@ function setupEventListeners() {
       togglePlayPause()
     } else if (e.key === 'Escape') {
       if (drawingState.selectedPixels.size > 0 || drawingState.pasteMode) {
+        saveUndoState()
         drawingState.selectedPixels.clear()
         drawingState.pasteMode = false
         stopMarchingAntsAnimation()
@@ -2462,7 +2661,19 @@ function setupEventListeners() {
       if (copySelectionToClipboard()) {
         saveUndoState()
         const rect = drawingState.selectRect
-        getActiveLayer().ctx.clearRect(rect.x, rect.y, rect.w, rect.h)
+        const layerCtx = getActiveLayer().ctx
+        // Clear only the selected pixels, not the entire rect
+        const imgData = layerCtx.getImageData(rect.x, rect.y, rect.w, rect.h)
+        const d = imgData.data
+        for (let i = 0; i < d.length; i += 4) {
+          const pi = i / 4
+          const px = rect.x + (pi % rect.w)
+          const py = rect.y + Math.floor(pi / rect.w)
+          if (drawingState.selectedPixels.has(px + ',' + py)) {
+            d[i + 3] = 0
+          }
+        }
+        layerCtx.putImageData(imgData, rect.x, rect.y)
         compositeAndDisplay()
       }
     } else if (e.ctrlKey && e.key === 'v') {
@@ -2491,10 +2702,22 @@ function selectTool(tool) {
   const btn = $(`.tool-btn[data-tool="${tool}"]`)
   if (btn) btn.classList.add('active')
 
+  // Clear any tool preview (pencil/eraser cursor dot, etc.)
+  previewCtx.clearRect(0, 0, totalW(), totalH())
+
   // Show/hide tool-specific panels
   const wandToleranceSection = $('#wandToleranceSection')
   if (wandToleranceSection) {
     wandToleranceSection.style.display = tool === 'wand' ? 'block' : 'none'
+    // Sync UI controls with current state values
+    if (tool === 'wand') {
+      const slider = $('#wandTolerance')
+      const valLabel = $('#wandToleranceValue')
+      const chk = $('#wandContiguous')
+      if (slider) slider.value = drawingState.wandTolerance
+      if (valLabel) valLabel.textContent = drawingState.wandTolerance
+      if (chk) chk.checked = drawingState.wandContiguous
+    }
   }
 
   const rigEditorPanel = $('#rigEditorPanel')
@@ -2511,13 +2734,27 @@ function selectTool(tool) {
     }
   }
 
-  if (tool === 'hand') {
-    canvasContainer.style.cursor = 'grab'
-    canvasWrapper.style.cursor = 'grab'
-  } else {
-    canvasContainer.style.cursor = ''
-    canvasWrapper.style.cursor = ''
+  // Set cursor for each tool
+  const toolCursors = {
+    pencil: 'crosshair',
+    eraser: 'crosshair',
+    fill: 'crosshair',
+    eyedropper: 'crosshair',
+    line: 'crosshair',
+    rect: 'crosshair',
+    circle: 'crosshair',
+    move: 'move',
+    select: 'crosshair',
+    wand: 'crosshair',
+    text: 'text',
+    rig: 'crosshair',
+    zoom: 'zoom-in',
+    'zoom-out': 'zoom-out',
+    hand: 'grab',
   }
+  const cursor = toolCursors[tool] || 'default'
+  canvasContainer.style.cursor = cursor
+  canvasWrapper.style.cursor = cursor
 
   const brushSizeSection = $('#brushSizeSection')
   if (brushSizeSection) {
@@ -2796,6 +3033,64 @@ function onCanvasMouseDown(e) {
     case 'wand':
       // Wand only requires layer to exist, not visibility
       if (!layer) return
+
+      // Check if clicking inside an existing selection to drag it
+      if (drawingState.selectRect && drawingState.selectedPixels.size > 0) {
+        const rect = drawingState.selectRect
+        const isInside = x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+          && drawingState.selectedPixels.has(x + ',' + y)
+
+        if (isInside) {
+          // Start dragging the selection
+          drawingState.dragSelection = true
+          drawingState.dragStartX = x
+          drawingState.dragStartY = y
+          drawingState.dragStartRectX = rect.x
+          drawingState.dragStartRectY = rect.y
+          drawingState.isDrawing = true
+
+          const dragRect = drawingState.selectRect
+
+          function extractSelectedPixels(srcCtx) {
+            const c = document.createElement('canvas')
+            c.width = dragRect.w
+            c.height = dragRect.h
+            const cCtx = c.getContext('2d')
+            cCtx.imageSmoothingEnabled = false
+            const imgData = srcCtx.getImageData(dragRect.x, dragRect.y, dragRect.w, dragRect.h)
+            const d = imgData.data
+            for (let i = 0; i < d.length; i += 4) {
+              const pi = i / 4
+              const px = dragRect.x + (pi % dragRect.w)
+              const py = dragRect.y + Math.floor(pi / dragRect.w)
+              if (!drawingState.selectedPixels.has(px + ',' + py)) d[i + 3] = 0
+            }
+            cCtx.putImageData(imgData, 0, 0)
+            return c
+          }
+
+          const selectedLayers = getSelectedLayers().filter(l => l.visible)
+          drawingState.draggedAllLayersData = selectedLayers.map(l => ({
+            layer: l,
+            canvas: extractSelectedPixels(l.ctx)
+          }))
+          drawingState.draggedPixelsCanvas = drawingState.draggedAllLayersData.find(
+            d => d.layer.id === state.activeLayerId
+          )?.canvas || extractSelectedPixels(layer.ctx)
+          break
+        } else {
+          // Click outside selection - clear selection
+          saveUndoState()
+          drawingState.selectedPixels.clear()
+          drawingState.selectRect = null
+          stopMarchingAntsAnimation()
+          previewCtx.clearRect(0, 0, totalW(), totalH())
+          $('#btnCopySelection').style.display = 'none'
+          $('#btnPasteSelection').style.display = 'none'
+          break
+        }
+      }
+
       // Detect selection mode based on keyboard modifiers
       if (e.ctrlKey && e.altKey) {
         drawingState.selectionMode = 'subtract'
@@ -2805,6 +3100,7 @@ function onCanvasMouseDown(e) {
         drawingState.selectionMode = 'replace'
       }
 
+      saveUndoState()
       selectByColor(x, y, layer.ctx)
       break
 
@@ -2878,12 +3174,14 @@ function onCanvasMouseDown(e) {
       break
 
     case 'zoom':
-      // Zoom doesn't require layer at all
-      if (e.shiftKey) {
-        state.zoom = Math.max(0.25, state.zoom - 0.25)
-      } else {
-        state.zoom = Math.min(5, state.zoom + 0.25)
-      }
+      // Zoom in
+      state.zoom = Math.min(5, state.zoom + 0.25)
+      updateCanvasDisplay()
+      break
+
+    case 'zoom-out':
+      // Zoom out
+      state.zoom = Math.max(0.25, state.zoom - 0.25)
       updateCanvasDisplay()
       break
 
@@ -3078,7 +3376,7 @@ function onCanvasMouseMove(e) {
     case 'select':
     case 'wand':
       if (drawingState.dragSelection) {
-        // Handle dragging selection rectangle with pixels
+        // Handle dragging selection with pixels
         const dx = x - drawingState.dragStartX
         const dy = y - drawingState.dragStartY
         const newX = drawingState.dragStartRectX + dx
@@ -3087,6 +3385,16 @@ function onCanvasMouseMove(e) {
         // Update selection rect position
         drawingState.selectRect.x = newX
         drawingState.selectRect.y = newY
+
+        // Update selectedPixels positions for pixel-accurate outline during drag
+        if (!drawingState._originalSelectedPixels) {
+          drawingState._originalSelectedPixels = new Set(drawingState.selectedPixels)
+        }
+        drawingState.selectedPixels.clear()
+        drawingState._originalSelectedPixels.forEach(key => {
+          const [px, py] = key.split(',').map(Number)
+          drawingState.selectedPixels.add((px + dx) + ',' + (py + dy))
+        })
 
         // Draw marching ants and dragged pixels on preview
         previewCtx.clearRect(0, 0, totalW(), totalH())
@@ -3100,10 +3408,10 @@ function onCanvasMouseMove(e) {
           previewCtx.drawImage(drawingState.draggedPixelsCanvas, newX, newY)
         }
         previewCtx.globalAlpha = 1
-        // Draw marching ants at new position
+        // Draw pixel-accurate marching ants at new position
         const savedOffset = drawingState.marchingAntsOffset
         drawingState.marchingAntsOffset = 0
-        drawMarchingAntsRect(newX, newY, drawingState.selectRect.w, drawingState.selectRect.h, previewCtx)
+        drawMarchingAntsFromPixels(previewCtx)
         drawingState.marchingAntsOffset = savedOffset
       } else if (drawingState.selectStart && !drawingState.pasteMode) {
         const minX = Math.min(drawingState.selectStart.x, x)
@@ -3235,6 +3543,9 @@ function onCanvasMouseUp(e) {
         ? drawingState.draggedAllLayersData
         : [{ layer: getActiveLayer(), canvas: drawingState.draggedPixelsCanvas }]
 
+      // Use original pixel positions for clearing old data
+      const origPixels = drawingState._originalSelectedPixels || drawingState.selectedPixels
+
       for (const { layer: l, canvas } of layersToMove) {
         if (!l) continue
         // Clear selected pixels at old position
@@ -3244,7 +3555,7 @@ function onCanvasMouseUp(e) {
           const pi = i / 4
           const px = oldRect.x + (pi % oldRect.w)
           const py = oldRect.y + Math.floor(pi / oldRect.w)
-          if (drawingState.selectedPixels.has(px + ',' + py)) oldData[i + 3] = 0
+          if (origPixels.has(px + ',' + py)) oldData[i + 3] = 0
         }
         l.ctx.putImageData(oldImageData, oldRect.x, oldRect.y)
         // Draw at new position
@@ -3258,16 +3569,17 @@ function onCanvasMouseUp(e) {
     drawingState.dragSelection = false
     drawingState.draggedPixelsCanvas = null
     drawingState.draggedAllLayersData = null
+    drawingState._originalSelectedPixels = null
     previewCtx.clearRect(0, 0, totalW(), totalH())
     startMarchingAntsAnimation()
     drawingState.isDrawing = false
     return
   }
 
-  if ((state.currentTool === 'select' || state.currentTool === 'wand') && drawingState.selectRect && !drawingState.pasteMode) {
-    // Finalize selection with mode logic
+  if (state.currentTool === 'select' && drawingState.selectRect && !drawingState.pasteMode) {
+    // Finalize rectangular selection with mode logic (select tool only)
+    saveUndoState()
     const rect = drawingState.selectRect
-    console.log('Finalizing selection rect:', rect)
 
     switch (drawingState.selectionMode) {
       case 'replace':
@@ -3281,7 +3593,6 @@ function onCanvasMouseUp(e) {
             drawingState.selectedPixels.add(px + ',' + py)
           }
         }
-        console.log('Selection finalized, total selected pixels:', drawingState.selectedPixels.size)
         break
 
       case 'subtract':
@@ -3291,10 +3602,14 @@ function onCanvasMouseUp(e) {
             drawingState.selectedPixels.delete(px + ',' + py)
           }
         }
-        console.log('Selection subtracted, remaining selected pixels:', drawingState.selectedPixels.size)
         break
     }
 
+    startMarchingAntsAnimation()
+    previewCtx.clearRect(0, 0, totalW(), totalH())
+    $('#btnCopySelection').style.display = 'block'
+  } else if (state.currentTool === 'wand' && drawingState.selectedPixels.size > 0 && !drawingState.pasteMode) {
+    // Wand selection was already computed in mousedown via selectByColor
     startMarchingAntsAnimation()
     previewCtx.clearRect(0, 0, totalW(), totalH())
     $('#btnCopySelection').style.display = 'block'
