@@ -2281,7 +2281,7 @@ function setupEventListeners() {
   $('#menuNew').addEventListener('click', () => createNewProject())
   $('#menuOpen').addEventListener('click', openProjectFile)
   $('#menuSave').addEventListener('click', () => exportAnima())
-  $('#menuSaveAs').addEventListener('click', () => exportAnima())
+  $('#menuSaveAs').addEventListener('click', () => exportAnima(true))
   $('#menuExportSheet').addEventListener('click', exportSpritesheet)
   $('#menuCloseTab').addEventListener('click', () => closeProject(appState.currentProjectIndex))
   $('#menuCloseAllTabs').addEventListener('click', closeAllProjects)
@@ -2609,49 +2609,12 @@ function setupEventListeners() {
     } else if (e.ctrlKey && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
       e.preventDefault()
       redo()
-    } else if (e.key === 'b' || e.key === 'B') {
-      selectTool('pencil')
-    } else if (e.key === 'e' || e.key === 'E') {
-      selectTool('eraser')
-    } else if (e.key === 'g' || e.key === 'G') {
-      selectTool('fill')
-    } else if (e.key === 'i' || e.key === 'I') {
-      selectTool('eyedropper')
-    } else if (e.key === 'l' || e.key === 'L') {
-      selectTool('line')
-    } else if (e.key === 'r' || e.key === 'R') {
-      selectTool('rect')
-    } else if (e.key === 'm' || e.key === 'M') {
-      selectTool('move')
-    } else if (e.key === 's' || e.key === 'S') {
-      selectTool('select')
-    } else if (e.key === 'w' || e.key === 'W') {
-      selectTool('wand')
-    } else if (e.key === 't' || e.key === 'T') {
-      selectTool('text')
-    } else if (e.key === 'z') {
-      selectTool('zoom')
-    } else if (e.key === 'Z') {
-      selectTool('zoom-out')
-    } else if (e.key === 'c' || e.key === 'C') {
-      selectTool('circle')
-    } else if (e.key === 'o' || e.key === 'O') {
-      state.onionSkin = !state.onionSkin
-      $('#toggleOnionSkin').classList.toggle('active', state.onionSkin)
-      compositeAndDisplay()
-    } else if (e.key === ' ') {
+    } else if (e.ctrlKey && e.key === 's') {
       e.preventDefault()
-      togglePlayPause()
-    } else if (e.key === 'Escape') {
-      if (drawingState.selectedPixels.size > 0 || drawingState.pasteMode) {
-        saveUndoState()
-        drawingState.selectedPixels.clear()
-        drawingState.pasteMode = false
-        stopMarchingAntsAnimation()
-        drawingState.selectRect = null
-        previewCtx.clearRect(0, 0, totalW(), totalH())
-        $('#btnCopySelection').style.display = 'none'
-        $('#btnPasteSelection').style.display = 'none'
+      if (e.shiftKey) {
+        exportAnima(true)   // Guardar como...
+      } else {
+        exportAnima()       // Guardar
       }
     } else if (e.ctrlKey && e.key === 'c') {
       e.preventDefault()
@@ -2691,6 +2654,53 @@ function setupEventListeners() {
         // Draw the pasted content to the preview
         previewCtx.clearRect(0, 0, totalW(), totalH())
         previewCtx.drawImage(drawingState.clipboardCanvas, drawingState.pasteStartX, drawingState.pasteStartY)
+      }
+    // --- Tool shortcuts (only when no Ctrl/Alt modifiers) ---
+    } else if (!e.ctrlKey && !e.altKey) {
+      if (e.key === 'b' || e.key === 'B') {
+        selectTool('pencil')
+      } else if (e.key === 'e' || e.key === 'E') {
+        selectTool('eraser')
+      } else if (e.key === 'g' || e.key === 'G') {
+        selectTool('fill')
+      } else if (e.key === 'i' || e.key === 'I') {
+        selectTool('eyedropper')
+      } else if (e.key === 'l' || e.key === 'L') {
+        selectTool('line')
+      } else if (e.key === 'r' || e.key === 'R') {
+        selectTool('rect')
+      } else if (e.key === 'm' || e.key === 'M') {
+        selectTool('move')
+      } else if (e.key === 's' || e.key === 'S') {
+        selectTool('select')
+      } else if (e.key === 'w' || e.key === 'W') {
+        selectTool('wand')
+      } else if (e.key === 't' || e.key === 'T') {
+        selectTool('text')
+      } else if (e.key === 'z') {
+        selectTool('zoom')
+      } else if (e.key === 'Z') {
+        selectTool('zoom-out')
+      } else if (e.key === 'c' || e.key === 'C') {
+        selectTool('circle')
+      } else if (e.key === 'o' || e.key === 'O') {
+        state.onionSkin = !state.onionSkin
+        $('#toggleOnionSkin').classList.toggle('active', state.onionSkin)
+        compositeAndDisplay()
+      } else if (e.key === ' ') {
+        e.preventDefault()
+        togglePlayPause()
+      } else if (e.key === 'Escape') {
+        if (drawingState.selectedPixels.size > 0 || drawingState.pasteMode) {
+          saveUndoState()
+          drawingState.selectedPixels.clear()
+          drawingState.pasteMode = false
+          stopMarchingAntsAnimation()
+          drawingState.selectRect = null
+          previewCtx.clearRect(0, 0, totalW(), totalH())
+          $('#btnCopySelection').style.display = 'none'
+          $('#btnPasteSelection').style.display = 'none'
+        }
       }
     }
   })
