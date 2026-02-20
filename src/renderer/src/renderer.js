@@ -4759,12 +4759,18 @@ function exportAnima(forcePrompt = false) {
   let targetName = state.fileName || `${state.name || 'proyecto'}.anima`
   if (forcePrompt || !state.fileName) {
     const suggested = targetName.endsWith('.anima') ? targetName : `${targetName}.anima`
-    const newName = window.prompt('Nombre de archivo (.anima):', suggested)
-    if (!newName) return
-    targetName = newName.toLowerCase().endsWith('.anima') ? newName : `${newName}.anima`
-    state.fileName = targetName
+    showFilenameDialog(suggested, (newName) => {
+      if (!newName) return
+      targetName = newName.toLowerCase().endsWith('.anima') ? newName : `${newName}.anima`
+      state.fileName = targetName
+      _doExportAnima(targetName)
+    })
+  } else {
+    _doExportAnima(targetName)
   }
+}
 
+function _doExportAnima(targetName) {
   const payload = {
     version: 1,
     name: state.name,
@@ -4793,6 +4799,48 @@ function exportAnima(forcePrompt = false) {
   link.download = targetName
   link.click()
   URL.revokeObjectURL(url)
+}
+
+function showFilenameDialog(defaultValue, callback) {
+  const dialog = $('#filenameDialog')
+  const overlay = $('#filenameDialogOverlay')
+  const input = $('#filenameInput')
+  const btnSave = $('#btnFilenameSave')
+  const btnCancel = $('#btnFilenameCancel')
+  if (!dialog || !overlay || !input) return callback(null)
+
+  input.value = defaultValue || ''
+  dialog.style.display = 'block'
+  overlay.style.display = 'block'
+  input.focus()
+  input.select()
+
+  function cleanup() {
+    dialog.style.display = 'none'
+    overlay.style.display = 'none'
+    btnSave.removeEventListener('click', onSave)
+    btnCancel.removeEventListener('click', onCancel)
+    overlay.removeEventListener('click', onCancel)
+    input.removeEventListener('keydown', onKey)
+  }
+  function onSave() {
+    const val = input.value.trim()
+    cleanup()
+    callback(val || null)
+  }
+  function onCancel() {
+    cleanup()
+    callback(null)
+  }
+  function onKey(e) {
+    if (e.key === 'Enter') { e.preventDefault(); onSave() }
+    else if (e.key === 'Escape') { e.preventDefault(); onCancel() }
+  }
+
+  btnSave.addEventListener('click', onSave)
+  btnCancel.addEventListener('click', onCancel)
+  overlay.addEventListener('click', onCancel)
+  input.addEventListener('keydown', onKey)
 }
 
 async function importAnimaData(data, fileName = null) {

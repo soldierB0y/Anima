@@ -587,6 +587,17 @@
   <!-- Save As Dialog Overlay -->
   <div id="saveAsDialogOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.3); z-index:1999;"></div>
 
+  <!-- Filename Prompt Dialog -->
+  <div id="filenameDialog" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); background:var(--bg-elevated, #2a2a2a); padding:20px; border-radius:8px; z-index:2000; box-shadow:0 4px 20px rgba(0,0,0,0.5); min-width:340px; color:var(--text-primary, #eee);">
+    <label style="display:block; margin-bottom:10px; font-weight:600; font-size:14px;">Nombre de archivo (.anima):</label>
+    <input type="text" id="filenameInput" style="width:100%; padding:8px 10px; border:1px solid var(--border-default, #555); border-radius:4px; background:var(--bg-dark, #1a1a1a); color:var(--text-primary, #eee); font-size:13px; box-sizing:border-box; outline:none;" />
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+      <button id="btnFilenameSave" style="padding:7px 18px; background:var(--accent, #6366f1); color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600; font-size:13px;">Guardar</button>
+      <button id="btnFilenameCancel" style="padding:7px 18px; border:1px solid var(--border-default, #555); border-radius:4px; cursor:pointer; background:transparent; color:var(--text-primary, #eee); font-size:13px;">Cancelar</button>
+    </div>
+  </div>
+  <div id="filenameDialogOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.3); z-index:1999;"></div>
+
   <script type="module" src="./src/renderer.js"></script>
 </body>
 
