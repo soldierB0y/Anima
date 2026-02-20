@@ -50,6 +50,7 @@ class Project {
     this.id = Date.now() + Math.random().toString(36).substr(2, 9)
     this.name = name
     this.fileName = null  // .anima destino actual
+    this.filePath = null  // ruta completa en disco
     this.width = width
     this.height = height
     this.zoom = 1
@@ -4623,7 +4624,7 @@ function openProjectFile() {
       file.text().then((txt) => {
         try {
           const data = JSON.parse(txt)
-          importAnimaData(data, file.name)
+          importAnimaData(data, file.name, file.path || null)
         } catch (err) {
           console.error('Error al cargar .anima', err)
         }
@@ -4753,24 +4754,9 @@ async function deserializeLayerTreeFromExport(items, width, height) {
   return result
 }
 
-function exportAnima(forcePrompt = false) {
+async function exportAnima(forcePrompt = false) {
   if (!state) return
 
-  let targetName = state.fileName || `${state.name || 'proyecto'}.anima`
-  if (forcePrompt || !state.fileName) {
-    const suggested = targetName.endsWith('.anima') ? targetName : `${targetName}.anima`
-    showFilenameDialog(suggested, (newName) => {
-      if (!newName) return
-      targetName = newName.toLowerCase().endsWith('.anima') ? newName : `${newName}.anima`
-      state.fileName = targetName
-      _doExportAnima(targetName)
-    })
-  } else {
-    _doExportAnima(targetName)
-  }
-}
-
-function _doExportAnima(targetName) {
   const payload = {
     version: 1,
     name: state.name,
@@ -4791,65 +4777,39 @@ function _doExportAnima(targetName) {
       boneWeights: state.rig.boneWeights,
     }
   }
+  const content = JSON.stringify(payload)
 
-  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = targetName
-  link.click()
-  URL.revokeObjectURL(url)
+  // Si ya tiene ruta en disco y no es "guardar como", sobrescribir directamente
+  if (!forcePrompt && state.filePath) {
+    const result = await window.api.writeFile(state.filePath, content)
+    if (!result.success) console.error('Error al guardar:', result.error)
+    return
+  }
+
+  // Mostrar diálogo nativo de guardar
+  const defaultName = state.fileName || `${state.name || 'proyecto'}.anima`
+  const dialogResult = await window.api.showSaveDialog({
+    title: 'Guardar como',
+    defaultPath: defaultName,
+    filters: [{ name: 'Anima Project', extensions: ['anima'] }]
+  })
+  if (dialogResult.canceled || !dialogResult.filePath) return
+
+  state.filePath = dialogResult.filePath
+  state.fileName = dialogResult.filePath.split(/[\\/]/).pop()
+
+  const result = await window.api.writeFile(state.filePath, content)
+  if (!result.success) console.error('Error al guardar:', result.error)
 }
 
-function showFilenameDialog(defaultValue, callback) {
-  const dialog = $('#filenameDialog')
-  const overlay = $('#filenameDialogOverlay')
-  const input = $('#filenameInput')
-  const btnSave = $('#btnFilenameSave')
-  const btnCancel = $('#btnFilenameCancel')
-  if (!dialog || !overlay || !input) return callback(null)
-
-  input.value = defaultValue || ''
-  dialog.style.display = 'block'
-  overlay.style.display = 'block'
-  input.focus()
-  input.select()
-
-  function cleanup() {
-    dialog.style.display = 'none'
-    overlay.style.display = 'none'
-    btnSave.removeEventListener('click', onSave)
-    btnCancel.removeEventListener('click', onCancel)
-    overlay.removeEventListener('click', onCancel)
-    input.removeEventListener('keydown', onKey)
-  }
-  function onSave() {
-    const val = input.value.trim()
-    cleanup()
-    callback(val || null)
-  }
-  function onCancel() {
-    cleanup()
-    callback(null)
-  }
-  function onKey(e) {
-    if (e.key === 'Enter') { e.preventDefault(); onSave() }
-    else if (e.key === 'Escape') { e.preventDefault(); onCancel() }
-  }
-
-  btnSave.addEventListener('click', onSave)
-  btnCancel.addEventListener('click', onCancel)
-  overlay.addEventListener('click', onCancel)
-  input.addEventListener('keydown', onKey)
-}
-
-async function importAnimaData(data, fileName = null) {
+async function importAnimaData(data, fileName = null, filePath = null) {
   if (!data || !data.frames) return
   const width = data.width || 16
   const height = data.height || 16
   createNewProject(data.name || 'Proyecto', width, height)
 
   state.fileName = fileName && fileName.toLowerCase().endsWith('.anima') ? fileName : null
+  state.filePath = filePath && filePath.toLowerCase().endsWith('.anima') ? filePath : null
 
   state.fps = data.fps ?? state.fps
   state.showGrid = data.showGrid ?? true

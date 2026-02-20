@@ -1,5 +1,6 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
+import { writeFileSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
@@ -56,6 +57,22 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
+
+  // Save dialog
+  ipcMain.handle('dialog:showSaveDialog', async (_event, options) => {
+    const win = BrowserWindow.getFocusedWindow()
+    return dialog.showSaveDialog(win, options)
+  })
+
+  // Write file to disk
+  ipcMain.handle('file:writeFile', async (_event, filePath, content) => {
+    try {
+      writeFileSync(filePath, content, 'utf-8')
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  })
 
   createWindow()
 
